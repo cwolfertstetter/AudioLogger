@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+recordings/
+*.wav
+*.log
+config.local.yaml
+.uv-cache/

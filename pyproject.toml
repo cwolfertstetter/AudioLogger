@@ -1,0 +1,48 @@
+[project]
+name = "audiologger"
+version = "0.1.0"
+description = "Windows tray meeting recorder with local WhisperX transcription"
+requires-python = ">=3.11"
+dependencies = [
+    "soundcard>=0.4.3",
+    "pystray>=0.19.5",
+    "Pillow>=10.0.0",
+    "keyboard>=0.13.5",
+    "winotify>=1.1.0",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+    "pycaw>=20240210",
+    "comtypes>=1.4",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "torch>=2.1",
+    "torchaudio>=2.1",
+    "whisperx>=3.1",
+    "pyannote.audio>=3.1",
+]
+cpu = [
+    "torch>=2.1",
+    "torchaudio>=2.1",
+    "whisperx>=3.1",
+    "pyannote.audio>=3.1",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-mock>=3.12",
+]
+
+[project.scripts]
+audiologger = "audiologger.tray_app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/audiologger"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
