@@ -48,6 +48,9 @@ class TrayApp:
 
     def run(self) -> None:
         self._handle_orphaned_sessions()
+        if self.cfg.worker_prewarm:
+            log.info("Pre-warming transcription worker")
+            self.queue.prewarm()
         self._bind_hotkeys()
         self.icon = pystray.Icon(
             "AudioLogger",
@@ -163,6 +166,8 @@ class TrayApp:
             return f"In Warteschlange: {len(s.queued)}"
         if s.last_failed and not s.running and not s.queued:
             return f"Letzte Aufnahme fehlgeschlagen: {s.last_failed}"
+        if s.warming:
+            return "Worker wärmt auf..."
         return "Bereit"
 
     def _set_icon(self, image) -> None:
@@ -207,6 +212,13 @@ class TrayApp:
         self.hotkey.unbind()
         self.dictation_hotkey.unbind()
         self._stop_event.set()
+        worker = getattr(self.queue, "_worker", None)
+        if worker is not None and worker.poll() is None:
+            try:
+                worker.terminate()
+                worker.wait(timeout=5)
+            except Exception:
+                log.exception("Failed to terminate worker cleanly")
         if self.icon is not None:
             self.icon.stop()
 
