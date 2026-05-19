@@ -7,6 +7,7 @@ from typing import Callable, Protocol
 
 from audiologger.config import Config
 from audiologger.paths import MARKER_FILENAME, MODE_FILENAME, session_dirname
+from audiologger.recovery import find_latest_dictation_session
 
 log = logging.getLogger(__name__)
 
@@ -71,17 +72,31 @@ class RecordingController:
     def _start(self, mode: str = "meeting") -> None:
         out = self._config.output_dir
         out.mkdir(parents=True, exist_ok=True)
+
+        # Resolve effective mode and optional extend target before creating session dir.
+        target_session: Path | None = None
+        if mode == "dictation_extend":
+            target_session = find_latest_dictation_session(out)
+            if target_session is None:
+                log.info("No previous dictation session found; falling back to dictation mode")
+                mode = "dictation"
+
         session = out / session_dirname(self._clock())
         session.mkdir()
         (session / MARKER_FILENAME).touch()
         (session / MODE_FILENAME).write_text(mode, encoding="utf-8")
+
+        if mode == "dictation_extend" and target_session is not None:
+            (session / "target_session.txt").write_text(
+                target_session.as_posix(), encoding="utf-8"
+            )
 
         capture = self._capture_factory(
             session,
             self.SAMPLE_RATE,
             self._config.audio_source,
             list(self._config.filtered_app_names),
-            mode == "dictation",
+            mode in ("dictation", "dictation_extend"),
         )
         capture.start()
         self._current_capture = capture

@@ -216,3 +216,48 @@ def test_hotkey_of_different_mode_during_recording_ignored(controller, cfg):
     # No second session should have been created — still the same one
     sessions = list(cfg.output_dir.iterdir())
     assert len(sessions) == 1
+
+
+# --- dictation_extend mode tests -----------------------------------------
+
+def test_extend_mode_with_no_previous_falls_back_to_dictation(cfg):
+    """When no prior dictation session exists, extend falls back to plain dictation."""
+    controller = RecordingController(
+        config=cfg,
+        capture_factory=FakeCapture,
+        mix_fn=MagicMock(),
+        enqueue_fn=MagicMock(),
+        clock=lambda: datetime(2026, 5, 18, 14, 32, 15),
+    )
+    controller.toggle(mode="dictation_extend")
+    assert controller.state is RecordingState.RECORDING
+
+    session = cfg.output_dir / "2026-05-18_14-32-15"
+    from audiologger.paths import MODE_FILENAME
+    assert (session / MODE_FILENAME).read_text(encoding="utf-8") == "dictation"
+    assert not (session / "target_session.txt").exists()
+
+
+def test_extend_mode_with_previous_writes_target_marker(cfg):
+    """When a prior dictation session exists, extend writes mode=dictation_extend and target_session.txt."""
+    # Pre-create a previous dictation session (earlier timestamp so sort puts it before new one)
+    prior = cfg.output_dir / "2026-05-18_10-00-00"
+    prior.mkdir(parents=True)
+    (prior / "mode.txt").write_text("dictation", encoding="utf-8")
+
+    controller = RecordingController(
+        config=cfg,
+        capture_factory=FakeCapture,
+        mix_fn=MagicMock(),
+        enqueue_fn=MagicMock(),
+        clock=lambda: datetime(2026, 5, 18, 14, 32, 15),
+    )
+    controller.toggle(mode="dictation_extend")
+    assert controller.state is RecordingState.RECORDING
+
+    session = cfg.output_dir / "2026-05-18_14-32-15"
+    assert (session / "mode.txt").read_text(encoding="utf-8") == "dictation_extend"
+    target_txt = session / "target_session.txt"
+    assert target_txt.exists()
+    target_path = Path(target_txt.read_text(encoding="utf-8").strip())
+    assert target_path == prior
