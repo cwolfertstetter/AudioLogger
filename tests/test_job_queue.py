@@ -109,3 +109,51 @@ def test_status_mode_default_none_when_missing_key(state_dir):
     q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock())
     status = q.status()
     assert status.mode is None
+
+
+# --- Pre-warm tests -------------------------------------------------------
+
+def test_prewarm_spawns_worker_when_none_running(state_dir):
+    spawner = MagicMock()
+    spawner.return_value.poll.return_value = None  # alive after spawn
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=spawner)
+    q.prewarm()
+    spawner.assert_called_once_with(state_dir, prewarm=True)
+
+
+def test_prewarm_noop_when_worker_alive(state_dir):
+    spawner = MagicMock()
+    proc = MagicMock()
+    proc.poll.return_value = None  # stays alive
+    spawner.return_value = proc
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=spawner)
+    q.prewarm()
+    q.prewarm()  # second call — worker already alive
+    assert spawner.call_count == 1
+
+
+def test_enqueue_after_prewarm_reuses_worker(state_dir):
+    spawner = MagicMock()
+    proc = MagicMock()
+    proc.poll.return_value = None  # stays alive
+    spawner.return_value = proc
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=spawner)
+    q.prewarm()
+    q.enqueue(Path("C:/recs/s1"))  # worker still alive — no re-spawn
+    assert spawner.call_count == 1
+
+
+def test_status_warming_when_flag_present(state_dir):
+    (state_dir / "worker_status.json").write_text(
+        '{"running": null, "queued": [], "mode": null, "warming": true}', encoding="utf-8"
+    )
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock())
+    assert q.status().warming is True
+
+
+def test_status_warming_default_false(state_dir):
+    (state_dir / "worker_status.json").write_text(
+        '{"running": null, "queued": [], "mode": null}', encoding="utf-8"
+    )
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock())
+    assert q.status().warming is False
