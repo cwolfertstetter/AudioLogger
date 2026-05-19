@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from audiologger.audio_mix import mix_to_file
+from audiologger.audio_mix import mix_to_file, append_wav
 
 
 def write_wav(path: Path, samples: np.ndarray, sr: int = 48000) -> None:
@@ -76,3 +76,18 @@ def test_mix_both_missing_raises(tmp_path):
     out = tmp_path / "mixed.wav"
     with pytest.raises(FileNotFoundError):
         mix_to_file(tmp_path / "mic.wav", tmp_path / "sys.wav", out)
+
+
+# --- append_wav -----------------------------------------------------------
+
+def test_append_wav_concatenates_samples(tmp_path):
+    target = tmp_path / "target.wav"
+    addition = tmp_path / "addition.wav"
+    write_wav(target, np.full(48000, 100, dtype=np.int16))     # 1 second
+    write_wav(addition, np.full(24000, 200, dtype=np.int16))   # 0.5 second
+    append_wav(target, addition)
+    data, sr = read_wav(target)
+    assert sr == 48000
+    assert len(data) == 72000
+    assert np.all(data[:48000] == 100)
+    assert np.all(data[48000:] == 200)

@@ -5,7 +5,8 @@ from pathlib import Path
 import numpy as np
 
 
-def _read_int16(path: Path) -> tuple[np.ndarray, int]:
+def read_int16(path: Path) -> tuple[np.ndarray, int]:
+    """Read a 16-bit mono WAV file.  Returns (samples, sample_rate)."""
     with wave.open(str(path), "rb") as w:
         if w.getsampwidth() != 2:
             raise ValueError("expected 16-bit WAV")
@@ -16,12 +17,37 @@ def _read_int16(path: Path) -> tuple[np.ndarray, int]:
     return np.frombuffer(frames, dtype=np.int16), sr
 
 
-def _write_int16(path: Path, samples: np.ndarray, sr: int) -> None:
+# Keep private aliases so any callers (including mix_to_file itself) still work.
+_read_int16 = read_int16
+
+
+def write_int16(path: Path, samples: np.ndarray, sr: int) -> None:
+    """Write samples as a 16-bit mono WAV file."""
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(sr)
         w.writeframes(samples.astype(np.int16).tobytes())
+
+
+# Keep private alias.
+_write_int16 = write_int16
+
+
+def append_wav(target: Path, addition: Path) -> None:
+    """Concatenate *addition* onto *target* in-place (both must be 16-bit mono).
+
+    Reads both files, concatenates their samples, and writes the result back to
+    *target*.  Raises ValueError if sample rates differ.
+    """
+    target_samples, sr_target = read_int16(target)
+    addition_samples, sr_addition = read_int16(addition)
+    if sr_target != sr_addition:
+        raise ValueError(
+            f"sample rates differ: target={sr_target}, addition={sr_addition}"
+        )
+    concatenated = np.concatenate([target_samples, addition_samples])
+    write_int16(target, concatenated, sr_target)
 
 
 def mix_to_file(mic_path: Path, system_path: Path, out_path: Path) -> None:
