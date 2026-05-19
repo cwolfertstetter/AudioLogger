@@ -57,6 +57,8 @@ First launch writes `%APPDATA%/AudioLogger/config.yaml`. Edit it (or use tray me
 | `audio_source`          | `all`                  | `all` (system loopback) or `apps` (per-app filter)      |
 | `filtered_app_names`    | `[]`                   | e.g. `["Discord.exe", "Slack.exe"]` when `audio_source: apps` |
 | `notification_enabled`  | `true`                 | Windows toast notifications                             |
+| `worker_prewarm`        | `true`                 | Load transcription models when tray starts (~3-5 GB VRAM, ~15 s startup). Set `false` to lazy-load. |
+| `worker_warm_seconds`   | `600`                  | Seconds the worker stays alive idle between jobs. Lower = less VRAM held, higher = faster repeat transcriptions. Set very large for "always warm". |
 
 ## Run
 
