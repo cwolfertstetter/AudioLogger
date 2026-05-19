@@ -201,7 +201,8 @@ def _process_session(session_dir: Path, pipeline: WhisperXPipeline) -> None:
 
     model_label = f"WhisperX {pipeline.model_size}"
     if pipeline.diarization_enabled:
-        model_label += " + pyannote/speaker-diarization-3.1"
+        # whisperx 3.8+ uses speaker-diarization-community-1; older versions used 3.1.
+        model_label += " + pyannote/speaker-diarization-community-1"
 
     md = render_markdown(
         merged,
