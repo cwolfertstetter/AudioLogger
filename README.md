@@ -4,11 +4,13 @@ Windows tray utility for recording meetings (Slack, Discord, Teams, Zoom, ...) a
 
 ## What it does
 
-- **Global hotkey** (default `Ctrl+Alt+R`) toggles recording from any foreground app.
-- Captures **microphone** + **system audio** (WASAPI loopback) into separate WAV files.
-- After stop, a background worker transcribes both streams:
-  - Mic audio → labeled "Ich".
-  - System audio → diarized into "Sprecher 1", "Sprecher 2", ...
+- **Three global hotkeys** (configurable):
+  - `Ctrl+Alt+R` — Meeting: mic + system audio, Markdown transcript with speaker diarization.
+  - `Ctrl+Alt+D` — Dictation: mic-only, plain text, copied to clipboard for instant paste.
+  - `Ctrl+Alt+E` — Extend: appends a new chunk (audio + text) to the most recent dictation session.
+- For meetings, both streams are transcribed independently:
+  - Mic audio → labeled "Me".
+  - System audio → diarized into "Speaker 1", "Speaker 2", ...
 - Merged chronological Markdown transcript saved next to the audio.
 - Multilingual model (DE / EN / mixed handled out of the box).
 
@@ -43,13 +45,16 @@ uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 
 ## Configure
 
-First launch writes `%APPDATA%/AudioLogger/config.yaml`. Edit it (or use tray menu "Config-Datei öffnen..."):
+First launch writes `%APPDATA%/AudioLogger/config.yaml`. Edit it directly, or use the tray menu — most settings have a "Settings" submenu for in-place changes, and "Open Config File..." opens the file in your default editor.
 
 | Key                     | Default                | Notes                                                   |
 |-------------------------|------------------------|---------------------------------------------------------|
-| `hotkey`                | `ctrl+alt+r`           | `keyboard`-lib syntax, e.g. `f8`, `ctrl+shift+space`    |
+| `hotkey`                | `ctrl+alt+r`           | Meeting hotkey. `keyboard`-lib syntax, e.g. `f8`, `ctrl+shift+space` |
+| `dictation_hotkey`      | `ctrl+alt+d`           | Dictation hotkey (mic-only, plain text, clipboard)      |
+| `extend_hotkey`         | `ctrl+alt+e`           | Append a new chunk to the most recent dictation session |
 | `output_dir`            | `./recordings`         | Where session folders are written                       |
-| `whisper_model`         | `large-v3`             | `tiny` / `base` / `small` / `medium` / `large-v3`       |
+| `whisper_model`         | `large-v3`             | Meeting model. `tiny` / `base` / `small` / `medium` / `large-v3` |
+| `dictation_model`       | `medium`               | Dictation model. Same options; smaller = faster, slightly less accurate |
 | `device`                | `cuda`                 | `cuda` or `cpu`                                         |
 | `compute_type`          | `float16`              | GPU: `float16`. CPU: use `int8`                         |
 | `diarization_enabled`   | `true`                 | Requires `huggingface_token`                            |
@@ -59,7 +64,6 @@ First launch writes `%APPDATA%/AudioLogger/config.yaml`. Edit it (or use tray me
 | `notification_enabled`  | `true`                 | Windows toast notifications                             |
 | `worker_prewarm`        | `true`                 | Load transcription models when tray starts (~3-5 GB VRAM, ~15 s startup). Set `false` to lazy-load. |
 | `worker_warm_seconds`   | `600`                  | Seconds the worker stays alive idle between jobs. Lower = less VRAM held, higher = faster repeat transcriptions. Set very large for "always warm". |
-| `extend_hotkey`         | `ctrl+alt+e`           | Hotkey to append a new chunk to the most recent dictation session. Keyboard-lib syntax. |
 
 ## Run
 
@@ -73,7 +77,7 @@ Or, **without a terminal** (Explorer / pinned shortcut / autostart): double-clic
 and starts the tray silently — no CMD window appears.
 
 A tray icon appears (grey = idle, red = recording, yellow = transcribing).
-Right-click for menu (start/stop, change output, change audio source, open config, retry last, quit).
+Right-click for menu: start/stop each mode, settings submenu (model/device/diarization/notifications/pre-warm), output folder, audio source, open config file, re-transcribe last recording, quit.
 
 **Three recording modes:**
 - `Ctrl+Alt+R` — Meeting: mic + system audio, Markdown transcript with speaker diarization.
@@ -109,7 +113,7 @@ recordings/
 
 ## Troubleshooting
 
-- **"Hotkey-Konflikt" toast:** Edit `hotkey` in config.yaml, restart.
+- **"Hotkey conflict" toast:** Edit the relevant `*_hotkey` field in config.yaml, restart.
 - **Diarization disabled warning in transcript:** Set `huggingface_token` in config and accept model terms at <https://huggingface.co/pyannote/speaker-diarization-community-1> (and <https://huggingface.co/pyannote/speaker-diarization-3.1> for older whisperx versions). Worker logs a `GatedRepoError` when the right model hasn't been accepted yet.
 - **First-run transcription hangs for several minutes:** WhisperX is downloading the ~3 GB model. Subsequent runs use the cache in `%USERPROFILE%/.cache`.
 - **"App-Filter nicht verfügbar" toast:** Per-app loopback needs Windows 10 21H2+ and a `pyaudiowpatch` build that exposes `PaWasapiStreamInfo`. The app silently falls back to full-system loopback for that recording.

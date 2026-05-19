@@ -18,14 +18,14 @@ Automated tests cover state machines and pure functions. The following scenarios
 4. Play a short YouTube clip in English in the background.
 5. Press hotkey to stop.
 6. Wait for transcription.
-7. **Expected:** `transcript.md` contains both DE and EN text correctly; mic audio labeled "Ich"; video audio labeled "Sprecher 1" (and possibly more if multiple speakers).
+7. **Expected:** `transcript.md` contains both DE and EN text correctly; mic audio labeled "Me"; video audio labeled "Speaker 1" (and possibly more if multiple speakers).
 
 ### TC-2: Hotkey works across foreground apps
 1. Start AudioLogger.
 2. Open Discord in full-screen voice call.
-3. Press hotkey — expect "Aufnahme gestartet" toast.
+3. Press hotkey — expect "Recording started" toast.
 4. Switch to Slack call.
-5. Press hotkey — expect "Aufnahme beendet" toast.
+5. Press hotkey — expect "Recording stopped" toast.
 6. **Expected:** Hotkey triggers regardless of focused app.
 
 ### TC-3: Default device change mid-recording
