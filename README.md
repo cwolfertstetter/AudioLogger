@@ -60,12 +60,31 @@ First launch writes `%APPDATA%/AudioLogger/config.yaml`. Edit it (or use tray me
 
 ## Run
 
+From a terminal:
 ```bash
 uv run audiologger
 ```
 
+Or, **without a terminal** (Explorer / pinned shortcut / autostart): double-click
+`scripts/start-audiologger.vbs`. The launcher resolves paths relative to itself
+and starts the tray silently — no CMD window appears.
+
 A tray icon appears (grey = idle, red = recording, yellow = transcribing).
 Right-click for menu (start/stop, change output, change audio source, open config, retry last, quit).
+
+### Autostart on login
+
+1. Press `Win + R`, type `shell:startup`, hit Enter — Windows opens the per-user
+   startup folder.
+2. Drag `scripts/start-audiologger.vbs` in there (hold Alt while dragging to
+   create a shortcut instead of moving the file).
+3. Sign out + back in to verify the tray icon appears automatically.
+
+### Pin to taskbar
+
+Right-click `scripts/start-audiologger.vbs` → **Create shortcut** → drag the
+shortcut onto your taskbar. (Windows refuses to pin `.vbs` directly, but it
+accepts a `.lnk` that points at one.)
 
 ## Output layout
 
