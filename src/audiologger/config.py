@@ -19,6 +19,7 @@ class Config:
     filtered_app_names: list[str] = field(default_factory=list)
     notification_enabled: bool = True
     dictation_hotkey: str = "ctrl+alt+d"
+    extend_hotkey: str = "ctrl+alt+e"
     dictation_model: str = "medium"
     worker_prewarm: bool = True
     worker_warm_seconds: int = 600  # 10 minutes
