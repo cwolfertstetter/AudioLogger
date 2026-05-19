@@ -55,12 +55,13 @@ def test_enqueue_respawns_if_worker_exited(state_dir):
 
 def test_status_reads_heartbeat(state_dir):
     (state_dir / "worker_status.json").write_text(
-        '{"running": "session-1", "queued": ["session-2"]}'
+        '{"running": "session-1", "queued": ["session-2"], "mode": "meeting"}'
     )
     q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock())
     status = q.status()
     assert status.running == "session-1"
     assert status.queued == ["session-2"]
+    assert status.mode == "meeting"
 
 
 def test_status_when_no_heartbeat(state_dir):
@@ -68,6 +69,7 @@ def test_status_when_no_heartbeat(state_dir):
     status = q.status()
     assert status.running is None
     assert status.queued == []
+    assert status.mode is None
 
 
 def test_pending_file_created_on_first_enqueue(state_dir):
@@ -97,3 +99,13 @@ def test_status_last_failed_none_when_file_empty(state_dir):
     q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock())
     status = q.status()
     assert status.last_failed is None
+
+
+def test_status_mode_default_none_when_missing_key(state_dir):
+    """If worker_status.json has no 'mode' key, status.mode is None."""
+    (state_dir / "worker_status.json").write_text(
+        '{"running": "session-1", "queued": []}', encoding="utf-8"
+    )
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock())
+    status = q.status()
+    assert status.mode is None
