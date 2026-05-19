@@ -6,15 +6,16 @@ import pytest
 
 from audiologger.config import Config
 from audiologger.controller import RecordingController, RecordingState
-from audiologger.paths import MARKER_FILENAME
+from audiologger.paths import MARKER_FILENAME, MODE_FILENAME
 
 
 class FakeCapture:
-    def __init__(self, session_dir: Path, sample_rate: int, source: str, app_names):
+    def __init__(self, session_dir: Path, sample_rate: int, source: str, app_names, mic_only: bool = False):
         self.session_dir = session_dir
         self.started = False
         self.stopped = False
         self.warnings: list[str] = []
+        self.mic_only = mic_only
 
     def start(self) -> None:
         self.started = True
@@ -92,7 +93,7 @@ class FakeCaptureWithWarnings(FakeCapture):
 
     def stop(self) -> None:
         self.stopped = True
-        self.warnings = ["Mikrofon nicht verfügbar — nur System-Audio aufgenommen.",
+        self.warnings = ["Mikrofon nicht verfügbar.",
                          "App-Filter nicht verfügbar — gesamtes System-Audio aufgenommen."]
 
 
@@ -111,7 +112,7 @@ def test_capture_warnings_written_to_file(cfg, tmp_path):
     warnings_file = session / "capture_warnings.txt"
     assert warnings_file.exists(), "capture_warnings.txt should be written"
     content = warnings_file.read_text(encoding="utf-8")
-    assert "Mikrofon nicht verfügbar" in content
+    assert "Mikrofon nicht verfügbar." in content
     assert "App-Filter nicht verfügbar" in content
 
 
@@ -155,3 +156,63 @@ def test_mix_error_still_removes_marker(cfg):
     assert (session / MARKER_FILENAME).exists()
     controller.toggle()  # stop — mix fails
     assert not (session / MARKER_FILENAME).exists()
+
+
+# --- Dictation mode tests -------------------------------------------------
+
+def test_dictation_mode_writes_mode_marker(controller, cfg):
+    """toggle(mode='dictation') writes mode.txt containing 'dictation'."""
+    controller.toggle(mode="dictation")
+    session = cfg.output_dir / "2026-05-18_14-32-15"
+    mode_file = session / MODE_FILENAME
+    assert mode_file.exists(), "mode.txt should be created"
+    assert mode_file.read_text(encoding="utf-8") == "dictation"
+
+
+def test_meeting_mode_writes_mode_marker(controller, cfg):
+    """Default toggle() writes mode.txt containing 'meeting'."""
+    controller.toggle()
+    session = cfg.output_dir / "2026-05-18_14-32-15"
+    mode_file = session / MODE_FILENAME
+    assert mode_file.exists(), "mode.txt should be created"
+    assert mode_file.read_text(encoding="utf-8") == "meeting"
+
+
+def test_dictation_mode_passes_mic_only_true(cfg):
+    """Dictation mode passes mic_only=True to capture factory; meeting passes False."""
+    times = [datetime(2026, 5, 18, 14, 32, 15), datetime(2026, 5, 18, 14, 33, 0)]
+    idx = 0
+
+    def advancing_clock():
+        nonlocal idx
+        t = times[idx % len(times)]
+        idx += 1
+        return t
+
+    ctrl = RecordingController(
+        config=cfg,
+        capture_factory=FakeCapture,
+        mix_fn=MagicMock(),
+        enqueue_fn=MagicMock(),
+        clock=advancing_clock,
+    )
+    ctrl.toggle(mode="dictation")
+    assert ctrl._current_capture.mic_only is True
+
+    ctrl.toggle(mode="dictation")  # stop
+
+    ctrl.toggle(mode="meeting")
+    assert ctrl._current_capture.mic_only is False
+
+
+def test_hotkey_of_different_mode_during_recording_ignored(controller, cfg):
+    """Toggling a different mode during recording is silently ignored."""
+    controller.toggle(mode="meeting")  # start meeting recording
+    assert controller.state is RecordingState.RECORDING
+
+    controller.toggle(mode="dictation")  # should be ignored
+    assert controller.state is RecordingState.RECORDING
+    assert controller._current_mode == "meeting"
+    # No second session should have been created — still the same one
+    sessions = list(cfg.output_dir.iterdir())
+    assert len(sessions) == 1

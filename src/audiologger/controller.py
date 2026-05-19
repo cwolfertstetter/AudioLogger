@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from audiologger.config import Config
-from audiologger.paths import MARKER_FILENAME, session_dirname
+from audiologger.paths import MARKER_FILENAME, MODE_FILENAME, session_dirname
 
 log = logging.getLogger(__name__)
 
@@ -24,8 +24,8 @@ class CaptureLike(Protocol):
     def stop(self) -> None: ...
 
 
-CaptureFactory = Callable[[Path, int, str, list[str]], CaptureLike]
-"""(session_dir, sample_rate, audio_source, filtered_app_names) -> CaptureLike"""
+CaptureFactory = Callable[[Path, int, str, list[str], bool], CaptureLike]
+"""(session_dir, sample_rate, audio_source, filtered_app_names, mic_only) -> CaptureLike"""
 
 
 class RecordingController:
@@ -48,34 +48,45 @@ class RecordingController:
         self._state = RecordingState.IDLE
         self._current_capture: CaptureLike | None = None
         self._current_session: Path | None = None
+        self._current_mode: str | None = None
 
     @property
     def state(self) -> RecordingState:
         return self._state
 
-    def toggle(self) -> None:
+    def toggle(self, mode: str = "meeting") -> None:
         if self._state is RecordingState.IDLE:
-            self._start()
+            self._start(mode)
         elif self._state is RecordingState.RECORDING:
-            self._stop()
+            if mode == self._current_mode:
+                self._stop()
+            else:
+                log.warning(
+                    "Hotkey for %s ignored — already recording in %s",
+                    mode,
+                    self._current_mode,
+                )
         # STOPPING: ignore
 
-    def _start(self) -> None:
+    def _start(self, mode: str = "meeting") -> None:
         out = self._config.output_dir
         out.mkdir(parents=True, exist_ok=True)
         session = out / session_dirname(self._clock())
         session.mkdir()
         (session / MARKER_FILENAME).touch()
+        (session / MODE_FILENAME).write_text(mode, encoding="utf-8")
 
         capture = self._capture_factory(
             session,
             self.SAMPLE_RATE,
             self._config.audio_source,
             list(self._config.filtered_app_names),
+            mode == "dictation",
         )
         capture.start()
         self._current_capture = capture
         self._current_session = session
+        self._current_mode = mode
         self._state = RecordingState.RECORDING
 
     def _stop(self) -> None:
@@ -99,6 +110,7 @@ class RecordingController:
         # the state machine in STOPPING permanently.
         self._current_capture = None
         self._current_session = None
+        self._current_mode = None
         self._state = RecordingState.IDLE
 
         mic = session / "mic.wav"
