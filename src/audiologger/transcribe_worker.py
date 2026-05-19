@@ -1,12 +1,17 @@
 """Transcription worker subprocess.
 
 Usage:
-    python -m audiologger.transcribe_worker <state_dir>
+    python -m audiologger.transcribe_worker <state_dir> [--prewarm]
 
 Reads <state_dir>/pending.txt, processes each session directory line-by-line,
-writes transcript.md + transcript.json into each session dir. Stays warm 30s
-after the last job to handle quickly-following enqueues.
+writes transcript.md + transcript.json into each session dir. Stays warm for
+worker_warm_seconds (default 600 s) after the last job to handle
+quickly-following enqueues.
+
+With --prewarm: eagerly loads whisper + dictation models before entering the
+poll loop, so the first job does not pay model-load latency.
 """
+import argparse
 import json
 import logging
 import sys
@@ -24,7 +29,7 @@ from audiologger.transcript_merger import merge_segments, render_markdown
 
 
 log = logging.getLogger("transcribe_worker")
-WARM_IDLE_SECONDS = 30
+DEFAULT_WARM_IDLE_SECONDS = 600
 POLL_INTERVAL_SECONDS = 1.0
 
 
@@ -62,9 +67,13 @@ def _write_status(
     running: str | None,
     queued: list[str],
     mode: str | None = None,
+    warming: bool = False,
 ) -> None:
     status_path.write_text(
-        json.dumps({"running": running, "queued": queued, "mode": mode}, ensure_ascii=False),
+        json.dumps(
+            {"running": running, "queued": queued, "mode": mode, "warming": warming},
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -304,13 +313,17 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2:
-        print("Usage: python -m audiologger.transcribe_worker <state_dir>", file=sys.stderr)
-        return 2
-    state_dir = Path(argv[1])
+    parser = argparse.ArgumentParser(prog="audiologger.transcribe_worker")
+    parser.add_argument("state_dir", help="Path to the worker state directory")
+    parser.add_argument("--prewarm", action="store_true", help="Eagerly load models before entering poll loop")
+    args = parser.parse_args(argv[1:])
+
+    state_dir = Path(args.state_dir)
     _setup_logging(state_dir)
 
     cfg = load_config(config_path())
+    warm_idle_seconds = getattr(cfg, "worker_warm_seconds", DEFAULT_WARM_IDLE_SECONDS)
+
     pipeline = WhisperXPipeline(
         model_size=cfg.whisper_model,
         device=cfg.device,
@@ -321,6 +334,17 @@ def main(argv: list[str]) -> int:
 
     pending_path = state_dir / "pending.txt"
     status_path = state_dir / "worker_status.json"
+
+    if args.prewarm:
+        log.info("Pre-warming: loading whisper model %s", cfg.whisper_model)
+        _write_status(status_path, running=None, queued=[], mode=None, warming=True)
+        pipeline._get_model(cfg.whisper_model)
+        dictation_model = getattr(cfg, "dictation_model", cfg.whisper_model)
+        if dictation_model != cfg.whisper_model:
+            log.info("Pre-warming: loading dictation model %s", dictation_model)
+            pipeline._get_model(dictation_model)
+        log.info("Pre-warming complete")
+        _write_status(status_path, running=None, queued=[], mode=None, warming=False)
 
     last_job_finished = datetime.now()
     while True:
@@ -351,8 +375,8 @@ def main(argv: list[str]) -> int:
             continue
 
         # Idle -- exit after warm window
-        if datetime.now() - last_job_finished > timedelta(seconds=WARM_IDLE_SECONDS):
-            log.info("Idle %s s, exiting", WARM_IDLE_SECONDS)
+        if datetime.now() - last_job_finished > timedelta(seconds=warm_idle_seconds):
+            log.info("Idle %s s, exiting", warm_idle_seconds)
             _write_status(status_path, running=None, queued=[], mode=None)
             return 0
 
