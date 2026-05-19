@@ -98,8 +98,11 @@ class WhisperXPipeline:
                 self.diarization_enabled = False
             else:
                 log.info("Loading pyannote diarization pipeline")
-                self._diarize = whisperx.DiarizationPipeline(
-                    use_auth_token=self.hf_token, device=self.device
+                # whisperx >= 3.8 moved DiarizationPipeline into whisperx.diarize
+                from whisperx.diarize import DiarizationPipeline
+                # whisperx >= 3.8 renamed use_auth_token → token
+                self._diarize = DiarizationPipeline(
+                    token=self.hf_token, device=self.device
                 )
 
     def transcribe(self, audio_path: Path, *, diarize: bool) -> list[Segment]:
