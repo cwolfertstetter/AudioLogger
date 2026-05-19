@@ -59,6 +59,7 @@ First launch writes `%APPDATA%/AudioLogger/config.yaml`. Edit it (or use tray me
 | `notification_enabled`  | `true`                 | Windows toast notifications                             |
 | `worker_prewarm`        | `true`                 | Load transcription models when tray starts (~3-5 GB VRAM, ~15 s startup). Set `false` to lazy-load. |
 | `worker_warm_seconds`   | `600`                  | Seconds the worker stays alive idle between jobs. Lower = less VRAM held, higher = faster repeat transcriptions. Set very large for "always warm". |
+| `extend_hotkey`         | `ctrl+alt+e`           | Hotkey to append a new chunk to the most recent dictation session. Keyboard-lib syntax. |
 
 ## Run
 
@@ -73,6 +74,11 @@ and starts the tray silently — no CMD window appears.
 
 A tray icon appears (grey = idle, red = recording, yellow = transcribing).
 Right-click for menu (start/stop, change output, change audio source, open config, retry last, quit).
+
+**Three recording modes:**
+- `Ctrl+Alt+R` — Meeting: mic + system audio, Markdown transcript with speaker diarization.
+- `Ctrl+Alt+D` — Dictation: mic-only, plain text, copied to clipboard for instant paste.
+- `Ctrl+Alt+E` — Extend: appends a new chunk to the most recent dictation session (audio + text). If no previous dictation exists, behaves like Ctrl+Alt+D.
 
 ### Autostart on login
 
