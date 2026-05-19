@@ -13,6 +13,8 @@ dependencies = [
     "numpy>=1.26",
     "pycaw>=20240210",
     "comtypes>=1.4",
+    "pyaudiowpatch>=0.2.12",
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
