@@ -17,7 +17,9 @@ Windows tray utility for recording meetings (Slack, Discord, Teams, Zoom, ...) a
 - Windows 10 (Build 19044 / 21H2 or newer recommended) or Windows 11.
 - Python 3.11+.
 - For GPU acceleration: NVIDIA GPU with CUDA 11.8 or 12.x.
-- A free [HuggingFace token](https://huggingface.co/settings/tokens) for pyannote diarization. Accept the model terms at https://huggingface.co/pyannote/speaker-diarization-3.1 first.
+- A free [HuggingFace token](https://huggingface.co/settings/tokens) for pyannote diarization. Accept the model terms at:
+  - https://huggingface.co/pyannote/speaker-diarization-community-1 (used by whisperx ≥ 3.8)
+  - https://huggingface.co/pyannote/speaker-diarization-3.1 (older whisperx; harmless to accept both)
 
 ## Install
 
@@ -81,7 +83,7 @@ recordings/
 ## Troubleshooting
 
 - **"Hotkey-Konflikt" toast:** Edit `hotkey` in config.yaml, restart.
-- **Diarization disabled warning in transcript:** Set `huggingface_token` in config and accept model terms at <https://huggingface.co/pyannote/speaker-diarization-3.1>.
+- **Diarization disabled warning in transcript:** Set `huggingface_token` in config and accept model terms at <https://huggingface.co/pyannote/speaker-diarization-community-1> (and <https://huggingface.co/pyannote/speaker-diarization-3.1> for older whisperx versions). Worker logs a `GatedRepoError` when the right model hasn't been accepted yet.
 - **First-run transcription hangs for several minutes:** WhisperX is downloading the ~3 GB model. Subsequent runs use the cache in `%USERPROFILE%/.cache`.
 - **"App-Filter nicht verfügbar" toast:** Per-app loopback needs Windows 10 21H2+ and a `pyaudiowpatch` build that exposes `PaWasapiStreamInfo`. The app silently falls back to full-system loopback for that recording.
 - **App crashed mid-recording:** Restart `audiologger` — orphan sessions are auto-detected and queued for transcription.
