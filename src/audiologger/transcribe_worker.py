@@ -13,6 +13,7 @@ import sys
 import time
 import traceback
 import wave
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -167,6 +168,13 @@ def _process_session(session_dir: Path, pipeline: WhisperXPipeline) -> None:
     sys_wav = session_dir / "system.wav"
     warnings: list[str] = []
 
+    # C1: prepend capture warnings from the controller
+    capture_warnings_file = session_dir / "capture_warnings.txt"
+    if capture_warnings_file.exists():
+        raw = capture_warnings_file.read_text(encoding="utf-8")
+        capture_warnings = [line for line in raw.splitlines() if line.strip()]
+        warnings.extend(capture_warnings)
+
     mic_segments = pipeline.transcribe(mic_wav, diarize=False)
     mic_segments = _force_speaker(mic_segments, "Ich")
 
@@ -203,9 +211,9 @@ def _process_session(session_dir: Path, pipeline: WhisperXPipeline) -> None:
     (session_dir / "transcript.md").write_text(md, encoding="utf-8")
 
     raw = {
-        "mic_segments": [s.__dict__ for s in mic_segments],
-        "system_segments": [s.__dict__ for s in sys_segments],
-        "merged": [s.__dict__ for s in merged],
+        "mic_segments": [asdict(s) for s in mic_segments],
+        "system_segments": [asdict(s) for s in sys_segments],
+        "merged": [asdict(s) for s in merged],
         "warnings": warnings,
     }
     (session_dir / "transcript.json").write_text(
@@ -238,12 +246,19 @@ def main(argv: list[str]) -> int:
         sessions = _read_pending(pending_path)
         if sessions:
             current = sessions[0]
+            last_failed_path = state_dir / "last_failed.txt"
             _write_status(status_path, running=current.name, queued=[s.name for s in sessions[1:]])
+            job_failed = False
             try:
                 _process_session(current, pipeline)
+                # M5: clear last_failed on success
+                last_failed_path.unlink(missing_ok=True)
             except Exception:
+                job_failed = True
                 log.error("Job failed for %s:\n%s", current, traceback.format_exc())
                 (current / "job.log").write_text(traceback.format_exc(), encoding="utf-8")
+                # M5: record the failed session name
+                last_failed_path.write_text(current.name, encoding="utf-8")
             finally:
                 # Remove this session from pending whether success or failure
                 remaining = _read_pending(pending_path)
