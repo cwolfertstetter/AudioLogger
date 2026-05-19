@@ -14,6 +14,8 @@ def test_default_values():
     assert c.audio_source == "all"
     assert c.filtered_app_names == []
     assert c.notification_enabled is True
+    assert c.dictation_hotkey == "ctrl+alt+d"
+    assert c.dictation_model == "medium"
 
 
 def test_load_creates_default_when_missing(tmp_path):

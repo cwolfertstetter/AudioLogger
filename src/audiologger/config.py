@@ -18,6 +18,8 @@ class Config:
     audio_source: str = "all"  # "all" | "apps"
     filtered_app_names: list[str] = field(default_factory=list)
     notification_enabled: bool = True
+    dictation_hotkey: str = "ctrl+alt+d"
+    dictation_model: str = "medium"
 
 
 def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
