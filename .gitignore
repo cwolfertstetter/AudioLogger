@@ -10,3 +10,9 @@ recordings/
 *.log
 config.local.yaml
 .uv-cache/
+.claude/
+# stray smoke-test artifacts that some tasks created temporarily
+smoke_*.py
+smoketest/
+app_loopback_test.wav
+icon_test.png

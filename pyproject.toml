@@ -2,6 +2,8 @@
 name = "audiologger"
 version = "0.1.0"
 description = "Windows tray meeting recorder with local WhisperX transcription"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
     "soundcard>=0.4.3",

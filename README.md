@@ -97,3 +97,7 @@ uv run audiologger                  # run the app
 ```
 
 Manual test checklist: `docs/MANUAL_TEST_PLAN.md`.
+
+## License
+
+MIT — see `LICENSE`.
