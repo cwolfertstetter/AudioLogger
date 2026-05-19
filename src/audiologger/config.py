@@ -20,6 +20,8 @@ class Config:
     notification_enabled: bool = True
     dictation_hotkey: str = "ctrl+alt+d"
     dictation_model: str = "medium"
+    worker_prewarm: bool = True
+    worker_warm_seconds: int = 600  # 10 minutes
 
 
 def _to_yaml_dict(cfg: Config) -> dict[str, Any]:

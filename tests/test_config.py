@@ -16,6 +16,8 @@ def test_default_values():
     assert c.notification_enabled is True
     assert c.dictation_hotkey == "ctrl+alt+d"
     assert c.dictation_model == "medium"
+    assert c.worker_prewarm is True
+    assert c.worker_warm_seconds == 600
 
 
 def test_load_creates_default_when_missing(tmp_path):
