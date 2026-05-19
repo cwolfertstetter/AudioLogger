@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 import pystray
 from pystray import MenuItem, Menu
@@ -146,6 +147,98 @@ class TrayApp:
         """Called by controller after stop. Hand off to queue."""
         self.queue.enqueue(session_dir)
 
+    # --- Settings helpers ----------------------------------------------
+
+    def _set_model(self, field: str, value: str) -> None:
+        """Mutate cfg.field, save, terminate worker so it reloads on next job."""
+        setattr(self.cfg, field, value)
+        save_config(config_path(), self.cfg)
+        # Terminate running worker — it will be respawned with the new model on next job.
+        worker = getattr(self.queue, "_worker", None)
+        if worker is not None and worker.poll() is None:
+            try:
+                worker.terminate()
+                worker.wait(timeout=5)
+            except Exception:
+                log.exception("Failed to terminate worker after model change")
+            self.queue._worker = None
+        self.notifier.notify(
+            "Model changed",
+            f"Whisper model set to {value}. Worker will reload on next job.",
+        )
+
+    def _set_bool_setting(self, field: str, label: str, value: bool) -> None:
+        """Mutate a boolean cfg field, save, and fire a toast."""
+        setattr(self.cfg, field, value)
+        save_config(config_path(), self.cfg)
+        state = "Enabled" if value else "Disabled"
+        self.notifier.notify(
+            "Setting changed",
+            f"{label} set to {state}. Restart may be required.",
+        )
+
+    def _set_device(self, value: str) -> None:
+        self.cfg.device = value
+        save_config(config_path(), self.cfg)
+        self.notifier.notify(
+            "Setting changed",
+            f"Device set to {value}. Restart may be required.",
+        )
+
+    def _make_model_menu(
+        self,
+        *,
+        current: Callable[[], str],
+        setter: Callable[[str], None],
+    ) -> Menu:
+        options = ["tiny", "base", "small", "medium", "large-v3"]
+        return Menu(*[
+            MenuItem(
+                opt,
+                lambda _, value=opt: setter(value),
+                radio=True,
+                checked=lambda _, value=opt: current() == value,
+            )
+            for opt in options
+        ])
+
+    def _make_bool_menu(
+        self,
+        *,
+        current: Callable[[], bool],
+        setter: Callable[[bool], None],
+    ) -> Menu:
+        return Menu(
+            MenuItem(
+                "Enabled",
+                lambda _: setter(True),
+                radio=True,
+                checked=lambda _: current() is True,
+            ),
+            MenuItem(
+                "Disabled",
+                lambda _: setter(False),
+                radio=True,
+                checked=lambda _: current() is False,
+            ),
+        )
+
+    def _make_device_menu(self) -> Menu:
+        return Menu(
+            MenuItem(
+                "CUDA (GPU)",
+                lambda _: self._set_device("cuda"),
+                radio=True,
+                checked=lambda _: self.cfg.device == "cuda",
+            ),
+            MenuItem(
+                "CPU",
+                lambda _: self._set_device("cpu"),
+                radio=True,
+                checked=lambda _: self.cfg.device == "cpu",
+            ),
+        )
+
     # --- Tray menu -----------------------------------------------------
 
     def _build_menu(self) -> Menu:
@@ -175,6 +268,50 @@ class TrayApp:
                 ),
             ),
             MenuItem("Open Config File...", lambda _: self._open_config_file()),
+            MenuItem(
+                "Settings",
+                Menu(
+                    MenuItem(
+                        "Whisper Model (Meetings)",
+                        self._make_model_menu(
+                            current=lambda: self.cfg.whisper_model,
+                            setter=lambda v: self._set_model("whisper_model", v),
+                        ),
+                    ),
+                    MenuItem(
+                        "Whisper Model (Dictation)",
+                        self._make_model_menu(
+                            current=lambda: self.cfg.dictation_model,
+                            setter=lambda v: self._set_model("dictation_model", v),
+                        ),
+                    ),
+                    MenuItem(
+                        "Device",
+                        self._make_device_menu(),
+                    ),
+                    MenuItem(
+                        "Diarization",
+                        self._make_bool_menu(
+                            current=lambda: self.cfg.diarization_enabled,
+                            setter=lambda v: self._set_bool_setting("diarization_enabled", "Diarization", v),
+                        ),
+                    ),
+                    MenuItem(
+                        "Notifications",
+                        self._make_bool_menu(
+                            current=lambda: self.cfg.notification_enabled,
+                            setter=lambda v: self._set_bool_setting("notification_enabled", "Notifications", v),
+                        ),
+                    ),
+                    MenuItem(
+                        "Worker Pre-warm",
+                        self._make_bool_menu(
+                            current=lambda: self.cfg.worker_prewarm,
+                            setter=lambda v: self._set_bool_setting("worker_prewarm", "Worker Pre-warm", v),
+                        ),
+                    ),
+                ),
+            ),
             MenuItem("Re-transcribe Last Recording", lambda _: self._retry_last()),
             Menu.SEPARATOR,
             MenuItem("Quit", lambda _: self._quit()),
