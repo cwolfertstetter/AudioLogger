@@ -1,4 +1,5 @@
 """RecordingController — state machine for the record/stop toggle."""
+import logging
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -6,6 +7,8 @@ from typing import Callable, Protocol
 
 from audiologger.config import Config
 from audiologger.paths import MARKER_FILENAME, session_dirname
+
+log = logging.getLogger(__name__)
 
 
 class RecordingState(Enum):
@@ -15,6 +18,8 @@ class RecordingState(Enum):
 
 
 class CaptureLike(Protocol):
+    warnings: list[str]
+
     def start(self) -> None: ...
     def stop(self) -> None: ...
 
@@ -75,19 +80,39 @@ class RecordingController:
 
     def _stop(self) -> None:
         self._state = RecordingState.STOPPING
-        assert self._current_capture is not None
-        assert self._current_session is not None
-        self._current_capture.stop()
-
+        if self._current_capture is None or self._current_session is None:
+            raise RuntimeError("_stop called without active capture/session")
+        capture = self._current_capture
         session = self._current_session
-        mic = session / "mic.wav"
-        sysw = session / "system.wav"
-        mixed = session / "mixed.wav"
-        self._mix_fn(mic, sysw, mixed)
+        capture.stop()
 
-        (session / MARKER_FILENAME).unlink(missing_ok=True)
-        self._enqueue_fn(session)
+        # C1: write capture warnings before dropping reference
+        if capture.warnings:
+            try:
+                (session / "capture_warnings.txt").write_text(
+                    "\n".join(capture.warnings) + "\n", encoding="utf-8"
+                )
+            except OSError:
+                log.exception("Failed to write capture_warnings.txt")
 
+        # C2: reset state BEFORE anything that can fail so errors don't lock
+        # the state machine in STOPPING permanently.
         self._current_capture = None
         self._current_session = None
         self._state = RecordingState.IDLE
+
+        mic = session / "mic.wav"
+        sysw = session / "system.wav"
+        mixed = session / "mixed.wav"
+        try:
+            self._mix_fn(mic, sysw, mixed)
+        except Exception:
+            log.exception("mix failed for %s", session)
+        try:
+            (session / MARKER_FILENAME).unlink(missing_ok=True)
+        except OSError:
+            log.exception("Failed to remove marker for %s", session)
+        try:
+            self._enqueue_fn(session)
+        except Exception:
+            log.exception("Failed to enqueue session %s", session)

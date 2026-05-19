@@ -14,6 +14,7 @@ class FakeCapture:
         self.session_dir = session_dir
         self.started = False
         self.stopped = False
+        self.warnings: list[str] = []
 
     def start(self) -> None:
         self.started = True
@@ -82,3 +83,75 @@ def test_session_dir_name_format(controller, cfg):
     sess_dirs = list(cfg.output_dir.iterdir())
     assert len(sess_dirs) == 1
     assert sess_dirs[0].name == "2026-05-18_14-32-15"
+
+
+# --- C1: capture warnings written to capture_warnings.txt ----------------
+
+class FakeCaptureWithWarnings(FakeCapture):
+    """FakeCapture that populates warnings after stop()."""
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.warnings = ["Mikrofon nicht verfügbar — nur System-Audio aufgenommen.",
+                         "App-Filter nicht verfügbar — gesamtes System-Audio aufgenommen."]
+
+
+def test_capture_warnings_written_to_file(cfg, tmp_path):
+    """When capture.warnings is non-empty, _stop() writes capture_warnings.txt."""
+    controller = RecordingController(
+        config=cfg,
+        capture_factory=FakeCaptureWithWarnings,
+        mix_fn=MagicMock(),
+        enqueue_fn=MagicMock(),
+        clock=lambda: datetime(2026, 5, 18, 14, 32, 15),
+    )
+    controller.toggle()  # start
+    session = cfg.output_dir / "2026-05-18_14-32-15"
+    controller.toggle()  # stop
+    warnings_file = session / "capture_warnings.txt"
+    assert warnings_file.exists(), "capture_warnings.txt should be written"
+    content = warnings_file.read_text(encoding="utf-8")
+    assert "Mikrofon nicht verfügbar" in content
+    assert "App-Filter nicht verfügbar" in content
+
+
+def test_no_capture_warnings_file_when_no_warnings(controller, cfg):
+    """When capture.warnings is empty, capture_warnings.txt must NOT be created."""
+    controller.toggle()  # start
+    session = cfg.output_dir / "2026-05-18_14-32-15"
+    controller.toggle()  # stop
+    assert not (session / "capture_warnings.txt").exists()
+
+
+# --- C2: mix_fn error does not lock state in STOPPING --------------------
+
+def test_mix_error_leaves_controller_idle(cfg):
+    """If mix_fn raises, the controller must still be IDLE afterward."""
+    failing_mix = MagicMock(side_effect=OSError("disk full"))
+    controller = RecordingController(
+        config=cfg,
+        capture_factory=FakeCapture,
+        mix_fn=failing_mix,
+        enqueue_fn=MagicMock(),
+        clock=lambda: datetime(2026, 5, 18, 14, 32, 15),
+    )
+    controller.toggle()  # start
+    controller.toggle()  # stop — mix fails
+    assert controller.state is RecordingState.IDLE
+
+
+def test_mix_error_still_removes_marker(cfg):
+    """If mix_fn raises, the marker file must still be cleaned up."""
+    failing_mix = MagicMock(side_effect=OSError("disk full"))
+    controller = RecordingController(
+        config=cfg,
+        capture_factory=FakeCapture,
+        mix_fn=failing_mix,
+        enqueue_fn=MagicMock(),
+        clock=lambda: datetime(2026, 5, 18, 14, 32, 15),
+    )
+    controller.toggle()  # start
+    session = cfg.output_dir / "2026-05-18_14-32-15"
+    assert (session / MARKER_FILENAME).exists()
+    controller.toggle()  # stop — mix fails
+    assert not (session / MARKER_FILENAME).exists()
