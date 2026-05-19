@@ -37,14 +37,14 @@ def render_markdown(
         duration_str = duration_str[3:]
 
     lines = [
-        f"# Aufnahme {recorded_at}",
+        f"# Recording {recorded_at}",
         "",
-        f"**Dauer:** {duration_str}",
-        f"**Quelle:** {source_label}",
-        f"**Modell:** {model_label}",
+        f"**Duration:** {duration_str}",
+        f"**Source:** {source_label}",
+        f"**Model:** {model_label}",
     ]
     for w in warnings:
-        lines.append(f"**Warnung:** {w}")
+        lines.append(f"**Warning:** {w}")
     lines.extend(["", "---", ""])
     for seg in segments:
         ts = format_timestamp(seg.start)

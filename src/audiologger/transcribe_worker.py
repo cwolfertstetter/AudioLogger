@@ -181,14 +181,14 @@ class WhisperXPipeline:
                 continue
             if diarize:
                 speaker_raw = seg.get("speaker", "SPEAKER_00")
-                # pyannote returns "SPEAKER_00", "SPEAKER_01", ... -> "Sprecher 1", "Sprecher 2", ...
+                # pyannote returns "SPEAKER_00", "SPEAKER_01", ... -> "Speaker 1", "Speaker 2", ...
                 if speaker_raw.startswith("SPEAKER_"):
                     num = int(speaker_raw.split("_")[1]) + 1
-                    speaker = f"Sprecher {num}"
+                    speaker = f"Speaker {num}"
                 else:
-                    speaker = "Andere"
+                    speaker = "Others"
             else:
-                speaker = "Andere"
+                speaker = "Others"
             segments.append(Segment(start=start, end=end, text=text, speaker=speaker))
         return segments
 
@@ -203,7 +203,7 @@ def _source_label(session_dir: Path, mic_present: bool, sys_present: bool) -> st
         parts.append("mic")
     if sys_present:
         parts.append("system (loopback)")
-    return " + ".join(parts) if parts else "kein Audio"
+    return " + ".join(parts) if parts else "no audio"
 
 
 def _read_mode(session_dir: Path) -> str:
@@ -403,11 +403,11 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
         warnings.extend(capture_warnings)
 
     mic_segments = pipeline.transcribe(mic_wav, diarize=False)
-    mic_segments = _force_speaker(mic_segments, "Ich")
+    mic_segments = _force_speaker(mic_segments, "Me")
 
     sys_segments = pipeline.transcribe(sys_wav, diarize=True)
     if not pipeline.diarization_enabled:
-        warnings.append("Diarization deaktiviert oder nicht verfügbar — Sprecher zusammengefasst als 'Andere'.")
+        warnings.append("Diarization disabled or unavailable — all speakers labelled 'Others'.")
 
     merged = merge_segments(mic_segments, sys_segments)
 
