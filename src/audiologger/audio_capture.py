@@ -27,11 +27,13 @@ class AudioCaptureThread:
         sample_rate: int,
         audio_source: str = "all",
         filtered_app_names: list[str] | None = None,
+        mic_only: bool = False,
     ):
         self._session_dir = session_dir
         self._sr = sample_rate
         self._audio_source = audio_source
         self._app_names = filtered_app_names or []
+        self._mic_only = mic_only
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self.warnings: list[str] = []
@@ -47,12 +49,15 @@ class AudioCaptureThread:
         t_mic = threading.Thread(
             target=self._run_mic, args=(mic_path,), name="audio-mic", daemon=True
         )
-        t_sys = threading.Thread(
-            target=self._run_system, args=(sys_path,), name="audio-sys", daemon=True
-        )
         t_mic.start()
-        t_sys.start()
-        self._threads = [t_mic, t_sys]
+        self._threads = [t_mic]
+
+        if not self._mic_only:
+            t_sys = threading.Thread(
+                target=self._run_system, args=(sys_path,), name="audio-sys", daemon=True
+            )
+            t_sys.start()
+            self._threads.append(t_sys)
 
     def stop(self) -> None:
         self._stop.set()
@@ -74,7 +79,7 @@ class AudioCaptureThread:
             self.mic_device_name = mic.name
         except Exception as e:
             log.warning("No mic available: %s", e)
-            self.warnings.append("Mikrofon nicht verfügbar — nur System-Audio aufgenommen.")
+            self.warnings.append("Mikrofon nicht verfügbar.")
             return
         try:
             with self._open_wav(out_path) as wav, mic.recorder(

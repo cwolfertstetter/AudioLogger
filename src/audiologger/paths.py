@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 MARKER_FILENAME = "RECORDING_IN_PROGRESS"
+MODE_FILENAME = "mode.txt"
 
 
 def appdata_dir() -> Path:
