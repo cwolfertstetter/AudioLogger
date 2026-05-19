@@ -17,7 +17,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from audiologger.config import load_config
+from audiologger.config import Config, load_config
 from audiologger.paths import config_path
 from audiologger.segment import Segment
 from audiologger.transcript_merger import merge_segments, render_markdown
@@ -57,9 +57,14 @@ def _write_pending(pending_path: Path, sessions: list[Path]) -> None:
     )
 
 
-def _write_status(status_path: Path, running: str | None, queued: list[str]) -> None:
+def _write_status(
+    status_path: Path,
+    running: str | None,
+    queued: list[str],
+    mode: str | None = None,
+) -> None:
     status_path.write_text(
-        json.dumps({"running": running, "queued": queued}, ensure_ascii=False),
+        json.dumps({"running": running, "queued": queued, "mode": mode}, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -81,52 +86,70 @@ class WhisperXPipeline:
         self.compute_type = compute_type
         self.diarization_enabled = diarization_enabled
         self.hf_token = hf_token
-        self._whisper = None
+        self._models: dict[str, object] = {}
         self._diarize = None
 
-    def _load(self) -> None:
-        if self._whisper is not None:
-            return
-        log.info("Loading WhisperX model %s on %s/%s", self.model_size, self.device, self.compute_type)
-        import whisperx
-        self._whisper = whisperx.load_model(
-            self.model_size, self.device, compute_type=self.compute_type
-        )
-        if self.diarization_enabled:
-            if not self.hf_token:
-                log.warning("Diarization enabled but no HuggingFace token; disabling diarization for this run")
-                self.diarization_enabled = False
-            else:
-                log.info("Loading pyannote diarization pipeline")
-                # whisperx >= 3.8 moved DiarizationPipeline into whisperx.diarize
-                from whisperx.diarize import DiarizationPipeline
-                # whisperx >= 3.8 renamed use_auth_token → token
-                self._diarize = DiarizationPipeline(
-                    token=self.hf_token, device=self.device
-                )
+    def _get_model(self, model_size: str) -> object:
+        """Load model on demand and cache by model_size."""
+        if model_size not in self._models:
+            log.info("Loading WhisperX model %s on %s/%s", model_size, self.device, self.compute_type)
+            import whisperx
+            self._models[model_size] = whisperx.load_model(
+                model_size, self.device, compute_type=self.compute_type
+            )
+        return self._models[model_size]
 
-    def transcribe(self, audio_path: Path, *, diarize: bool) -> list[Segment]:
+    def _ensure_diarize(self) -> None:
+        """Load diarization pipeline if not yet loaded."""
+        if self._diarize is not None:
+            return
+        if not self.diarization_enabled:
+            return
+        if not self.hf_token:
+            log.warning("Diarization enabled but no HuggingFace token; disabling diarization for this run")
+            self.diarization_enabled = False
+            return
+        log.info("Loading pyannote diarization pipeline")
+        from whisperx.diarize import DiarizationPipeline
+        self._diarize = DiarizationPipeline(
+            token=self.hf_token, device=self.device
+        )
+
+    def transcribe(
+        self,
+        audio_path: Path,
+        *,
+        diarize: bool,
+        model_size: str | None = None,
+        align: bool = True,
+    ) -> list[Segment]:
         if not audio_path.exists():
             return []
-        self._load()
+        effective_model = model_size if model_size is not None else self.model_size
+        whisper_model = self._get_model(effective_model)
+
         import whisperx
         audio = whisperx.load_audio(str(audio_path))
-        result = self._whisper.transcribe(audio, batch_size=16)
-        # Align word-level (improves timestamp accuracy; multilingual handled by whisperx)
-        try:
-            model_a, metadata = whisperx.load_align_model(
-                language_code=result["language"], device=self.device
-            )
-            result = whisperx.align(
-                result["segments"], model_a, metadata, audio, self.device,
-                return_char_alignments=False,
-            )
-        except Exception:
-            log.exception("Alignment failed; using non-aligned segments")
+        result = whisper_model.transcribe(audio, batch_size=16)
 
-        if diarize and self.diarization_enabled and self._diarize is not None:
-            diarize_segments = self._diarize(audio)
-            result = whisperx.assign_word_speakers(diarize_segments, result)
+        if align:
+            # Align word-level (improves timestamp accuracy; multilingual handled by whisperx)
+            try:
+                model_a, metadata = whisperx.load_align_model(
+                    language_code=result["language"], device=self.device
+                )
+                result = whisperx.align(
+                    result["segments"], model_a, metadata, audio, self.device,
+                    return_char_alignments=False,
+                )
+            except Exception:
+                log.exception("Alignment failed; using non-aligned segments")
+
+        if diarize and self.diarization_enabled:
+            self._ensure_diarize()
+            if self._diarize is not None:
+                diarize_segments = self._diarize(audio)
+                result = whisperx.assign_word_speakers(diarize_segments, result)
 
         return self._to_segments(result, diarize)
 
@@ -165,8 +188,62 @@ def _source_label(session_dir: Path, mic_present: bool, sys_present: bool) -> st
     return " + ".join(parts) if parts else "kein Audio"
 
 
-def _process_session(session_dir: Path, pipeline: WhisperXPipeline) -> None:
+def _read_mode(session_dir: Path) -> str:
+    """Read mode.txt from session dir. Returns 'meeting' if missing."""
+    mode_file = session_dir / "mode.txt"
+    if not mode_file.exists():
+        return "meeting"
+    return mode_file.read_text(encoding="utf-8").strip() or "meeting"
+
+
+def _process_session(session_dir: Path, pipeline: WhisperXPipeline, cfg: Config) -> None:
     log.info("Processing session %s", session_dir)
+    mode = _read_mode(session_dir)
+
+    if mode == "dictation":
+        _process_dictation_session(session_dir, pipeline, cfg)
+    else:
+        _process_meeting_session(session_dir, pipeline)
+
+
+def _process_dictation_session(session_dir: Path, pipeline: WhisperXPipeline, cfg: Config) -> None:
+    """Fast mic-only transcription; plain text output; clipboard copy."""
+    mic_wav = session_dir / "mic.wav"
+
+    segments = pipeline.transcribe(
+        mic_wav,
+        diarize=False,
+        model_size=cfg.dictation_model,
+        align=False,
+    )
+
+    joined_text = " ".join(s.text for s in segments)
+
+    # Write plain text transcript
+    (session_dir / "transcript.txt").write_text(joined_text, encoding="utf-8")
+
+    # Write JSON
+    raw = {
+        "text": joined_text,
+        "segments": [asdict(s) for s in segments],
+        "mode": "dictation",
+    }
+    (session_dir / "transcript.json").write_text(
+        json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    # Copy to clipboard
+    try:
+        import pyperclip
+        pyperclip.copy(joined_text)
+        log.info("Dictation text copied to clipboard (%d chars)", len(joined_text))
+    except Exception:
+        log.exception("Failed to copy dictation text to clipboard")
+
+    log.info("Wrote transcript.txt and transcript.json for %s", session_dir.name)
+
+
+def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> None:
     mic_wav = session_dir / "mic.wav"
     sys_wav = session_dir / "system.wav"
     warnings: list[str] = []
@@ -251,10 +328,11 @@ def main(argv: list[str]) -> int:
         if sessions:
             current = sessions[0]
             last_failed_path = state_dir / "last_failed.txt"
-            _write_status(status_path, running=current.name, queued=[s.name for s in sessions[1:]])
+            current_mode = _read_mode(current)
+            _write_status(status_path, running=current.name, queued=[s.name for s in sessions[1:]], mode=current_mode)
             job_failed = False
             try:
-                _process_session(current, pipeline)
+                _process_session(current, pipeline, cfg)
                 # M5: clear last_failed on success
                 last_failed_path.unlink(missing_ok=True)
             except Exception:
@@ -269,13 +347,13 @@ def main(argv: list[str]) -> int:
                 remaining = [p for p in remaining if p != current]
                 _write_pending(pending_path, remaining)
             last_job_finished = datetime.now()
-            _write_status(status_path, running=None, queued=[s.name for s in remaining])
+            _write_status(status_path, running=None, queued=[s.name for s in remaining], mode=None)
             continue
 
         # Idle -- exit after warm window
         if datetime.now() - last_job_finished > timedelta(seconds=WARM_IDLE_SECONDS):
             log.info("Idle %s s, exiting", WARM_IDLE_SECONDS)
-            _write_status(status_path, running=None, queued=[])
+            _write_status(status_path, running=None, queued=[], mode=None)
             return 0
 
         time.sleep(POLL_INTERVAL_SECONDS)

@@ -17,6 +17,7 @@ dependencies = [
     "comtypes>=1.4",
     "pyaudiowpatch>=0.2.12",
     "psutil>=5.9",
+    "pyperclip>=1.8",
 ]
 
 [project.optional-dependencies]
