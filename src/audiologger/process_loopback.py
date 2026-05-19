@@ -60,6 +60,12 @@ def record_app_loopback(
         raise ProcessLoopbackNotAvailable(
             f"None of the requested apps are running: {app_names}"
         )
+    if len(pids) > 1:
+        raise ProcessLoopbackNotAvailable(
+            f"Per-app loopback currently supports only one process at a time; "
+            f"found {len(pids)} matching PIDs for {app_names}. "
+            f"Reduce filtered_app_names to a single app or use audio_source='all'."
+        )
 
     import pyaudiowpatch as pyaudio
 
