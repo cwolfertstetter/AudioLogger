@@ -66,20 +66,20 @@ class TrayApp:
         ok = self.hotkey.bind(self.cfg.hotkey, self._on_meeting_hotkey)
         if not ok:
             self.notifier.notify(
-                "Hotkey-Konflikt",
-                f"'{self.cfg.hotkey}' konnte nicht gebunden werden. Bitte in Tray ändern.",
+                "Hotkey conflict",
+                f"'{self.cfg.hotkey}' could not be bound. Change it from the tray menu.",
             )
         ok2 = self.dictation_hotkey.bind(self.cfg.dictation_hotkey, self._on_dictation_hotkey)
         if not ok2:
             self.notifier.notify(
-                "Hotkey-Konflikt",
-                f"'{self.cfg.dictation_hotkey}' konnte nicht gebunden werden. Bitte in Tray ändern.",
+                "Hotkey conflict",
+                f"'{self.cfg.dictation_hotkey}' could not be bound. Change it from the tray menu.",
             )
         ok3 = self.extend_hotkey.bind(self.cfg.extend_hotkey, self._on_extend_hotkey)
         if not ok3:
             self.notifier.notify(
-                "Hotkey-Konflikt",
-                f"'{self.cfg.extend_hotkey}' konnte nicht gebunden werden. Bitte in Tray ändern.",
+                "Hotkey conflict",
+                f"'{self.cfg.extend_hotkey}' could not be bound. Change it from the tray menu.",
             )
 
     def _handle_orphaned_sessions(self) -> None:
@@ -100,14 +100,14 @@ class TrayApp:
             self.controller.toggle(mode="meeting")
         except Exception:
             log.exception("toggle failed")
-            self.notifier.notify("Fehler", "Aufnahme konnte nicht (be)endet werden — siehe Logs.")
+            self.notifier.notify("Error", "Recording could not start/stop — see logs.")
             return
         new_state = self.controller.state
         if prev_state is RecordingState.IDLE and new_state is RecordingState.RECORDING:
-            self.notifier.notify("Aufnahme gestartet", "Hotkey erneut drücken zum Stoppen.")
+            self.notifier.notify("Recording started", "Press hotkey again to stop.")
             self._set_icon(recording_icon())
         elif prev_state is RecordingState.RECORDING and new_state is RecordingState.IDLE:
-            self.notifier.notify("Aufnahme beendet", "Transkription läuft...")
+            self.notifier.notify("Recording stopped", "Transcribing...")
             self._set_icon(transcribing_icon())
 
     def _on_dictation_hotkey(self) -> None:
@@ -116,14 +116,14 @@ class TrayApp:
             self.controller.toggle(mode="dictation")
         except Exception:
             log.exception("toggle failed")
-            self.notifier.notify("Fehler", "Diktat konnte nicht (be)endet werden — siehe Logs.")
+            self.notifier.notify("Error", "Dictation could not start/stop — see logs.")
             return
         new_state = self.controller.state
         if prev_state is RecordingState.IDLE and new_state is RecordingState.RECORDING:
-            self.notifier.notify("Diktat gestartet", "Hotkey erneut drücken zum Stoppen.")
+            self.notifier.notify("Dictation started", "Press hotkey again to stop.")
             self._set_icon(recording_icon())
         elif prev_state is RecordingState.RECORDING and new_state is RecordingState.IDLE:
-            self.notifier.notify("Diktat beendet", "Transkription läuft...")
+            self.notifier.notify("Dictation stopped", "Transcribing...")
             self._set_icon(transcribing_icon())
 
     def _on_extend_hotkey(self) -> None:
@@ -132,14 +132,14 @@ class TrayApp:
             self.controller.toggle(mode="dictation_extend")
         except Exception:
             log.exception("toggle failed")
-            self.notifier.notify("Fehler", "Notiz konnte nicht (be)endet werden — siehe Logs.")
+            self.notifier.notify("Error", "Note could not start/stop — see logs.")
             return
         new_state = self.controller.state
         if prev_state is RecordingState.IDLE and new_state is RecordingState.RECORDING:
-            self.notifier.notify("Notiz wird aufgenommen", "Hotkey erneut drücken zum Stoppen.")
+            self.notifier.notify("Note recording started", "Press hotkey again to stop.")
             self._set_icon(recording_icon())
         elif prev_state is RecordingState.RECORDING and new_state is RecordingState.IDLE:
-            self.notifier.notify("Notiz beendet", "Transkription läuft...")
+            self.notifier.notify("Note stopped", "Transcribing...")
             self._set_icon(transcribing_icon())
 
     def _on_recording_finished(self, session_dir: Path) -> None:
@@ -152,47 +152,47 @@ class TrayApp:
         return Menu(
             MenuItem(lambda _: f"Status: {self._status_text()}", None, enabled=False),
             Menu.SEPARATOR,
-            MenuItem("Aufnahme starten/stoppen", lambda _: self._on_meeting_hotkey()),
-            MenuItem("Diktat starten/stoppen", lambda _: self._on_dictation_hotkey()),
-            MenuItem("Notiz anhängen (Extend)", lambda _: self._on_extend_hotkey()),
+            MenuItem("Start/Stop Meeting Recording", lambda _: self._on_meeting_hotkey()),
+            MenuItem("Start/Stop Dictation", lambda _: self._on_dictation_hotkey()),
+            MenuItem("Append Note (Extend)", lambda _: self._on_extend_hotkey()),
             Menu.SEPARATOR,
-            MenuItem("Output-Ordner ändern...", lambda _: self._pick_output_dir()),
+            MenuItem("Change Output Folder...", lambda _: self._pick_output_dir()),
             MenuItem(
-                "Audio-Quelle",
+                "Audio Source",
                 Menu(
                     MenuItem(
-                        "Alles (System-Loopback)",
+                        "All (System Loopback)",
                         lambda _: self._set_audio_source("all"),
                         radio=True,
                         checked=lambda _: self.cfg.audio_source == "all",
                     ),
                     MenuItem(
-                        "Nur ausgewählte Apps",
+                        "Selected Apps Only",
                         lambda _: self._set_audio_source("apps"),
                         radio=True,
                         checked=lambda _: self.cfg.audio_source == "apps",
                     ),
                 ),
             ),
-            MenuItem("Config-Datei öffnen...", lambda _: self._open_config_file()),
-            MenuItem("Letzte Aufnahme erneut transkribieren", lambda _: self._retry_last()),
+            MenuItem("Open Config File...", lambda _: self._open_config_file()),
+            MenuItem("Re-transcribe Last Recording", lambda _: self._retry_last()),
             Menu.SEPARATOR,
-            MenuItem("Beenden", lambda _: self._quit()),
+            MenuItem("Quit", lambda _: self._quit()),
         )
 
     def _status_text(self) -> str:
         if self.controller.state is RecordingState.RECORDING:
-            return "Aufnahme läuft"
+            return "Recording"
         s = self.queue.status()
         if s.running:
-            return f"Transkribiert: {s.running}"
+            return f"Transcribing: {s.running}"
         if s.queued:
-            return f"In Warteschlange: {len(s.queued)}"
+            return f"Queued: {len(s.queued)}"
         if s.last_failed and not s.running and not s.queued:
-            return f"Letzte Aufnahme fehlgeschlagen: {s.last_failed}"
+            return f"Last recording failed: {s.last_failed}"
         if s.warming:
-            return "Worker wärmt auf..."
-        return "Bereit"
+            return "Worker warming up..."
+        return "Ready"
 
     def _set_icon(self, image) -> None:
         if self.icon is not None:
@@ -209,12 +209,12 @@ class TrayApp:
         if chosen:
             self.cfg.output_dir = Path(chosen)
             save_config(config_path(), self.cfg)
-            self.notifier.notify("Output-Ordner geändert", chosen)
+            self.notifier.notify("Output folder changed", chosen)
 
     def _set_audio_source(self, source: str) -> None:
         self.cfg.audio_source = source
         save_config(config_path(), self.cfg)
-        self.notifier.notify("Audio-Quelle", f"Neue Quelle: {source}")
+        self.notifier.notify("Audio source", f"New source: {source}")
 
     def _open_config_file(self) -> None:
         os.startfile(str(config_path()))
@@ -222,15 +222,15 @@ class TrayApp:
     def _retry_last(self) -> None:
         out = self.cfg.output_dir
         if not out.exists():
-            self.notifier.notify("Keine Aufnahmen", f"{out} existiert nicht.")
+            self.notifier.notify("No recordings", f"{out} does not exist.")
             return
         sessions = sorted([d for d in out.iterdir() if d.is_dir()], key=lambda p: p.name)
         if not sessions:
-            self.notifier.notify("Keine Aufnahmen", "Output-Ordner ist leer.")
+            self.notifier.notify("No recordings", "Output folder is empty.")
             return
         last = sessions[-1]
         self.queue.enqueue(last)
-        self.notifier.notify("Re-Transkription gestartet", last.name)
+        self.notifier.notify("Re-transcription started", last.name)
 
     def _quit(self) -> None:
         self.hotkey.unbind()
@@ -278,8 +278,8 @@ class TrayApp:
                 elapsed = (datetime.now() - recording_started_at).total_seconds()
                 if elapsed > self.LONG_RECORDING_WARN_SECONDS and not long_warning_fired:
                     self.notifier.notify(
-                        "Lange Aufnahme",
-                        f"Aufnahme läuft seit {int(elapsed // 3600)}+ Stunden — alles ok?",
+                        "Long recording",
+                        f"Recording has been running for {int(elapsed // 3600)}+ hours — still good?",
                     )
                     long_warning_fired = True
             else:
@@ -332,13 +332,13 @@ class TrayApp:
         transcript = session_dir / "transcript.md"
         launch = transcript.as_uri() if transcript.exists() else session_dir.as_uri()
         actions = [
-            Action(label="Transkript öffnen", launch=transcript.as_uri()),
-            Action(label="Ordner öffnen", launch=session_dir.as_uri()),
+            Action(label="Open transcript", launch=transcript.as_uri()),
+            Action(label="Open folder", launch=session_dir.as_uri()),
         ] if transcript.exists() else [
-            Action(label="Ordner öffnen", launch=session_dir.as_uri()),
+            Action(label="Open folder", launch=session_dir.as_uri()),
         ]
         self.notifier.notify(
-            "Transkription fertig",
+            "Transcription complete",
             session_name,
             launch=launch,
             actions=actions,
@@ -348,12 +348,12 @@ class TrayApp:
         session_dir = (self.cfg.output_dir / session_name).resolve()
         job_log = session_dir / "job.log"
         actions = [
-            Action(label="Ordner öffnen", launch=session_dir.as_uri()),
+            Action(label="Open folder", launch=session_dir.as_uri()),
         ]
         if job_log.exists():
-            actions.insert(0, Action(label="Fehler-Log öffnen", launch=job_log.as_uri()))
+            actions.insert(0, Action(label="Open error log", launch=job_log.as_uri()))
         self.notifier.notify(
-            "Transkription fehlgeschlagen",
+            "Transcription failed",
             session_name,
             launch=session_dir.as_uri(),
             actions=actions,
@@ -373,9 +373,9 @@ class TrayApp:
         else:
             preview = ""
         launch = transcript.as_uri() if transcript.exists() else session_dir.as_uri()
-        actions = [Action(label="Datei öffnen", launch=transcript.as_uri())]
+        actions = [Action(label="Open file", launch=transcript.as_uri())]
         self.notifier.notify(
-            "Diktat fertig",
+            "Dictation complete",
             preview or session_name,
             launch=launch,
             actions=actions,
@@ -385,12 +385,12 @@ class TrayApp:
         session_dir = (self.cfg.output_dir / session_name).resolve()
         job_log = session_dir / "job.log"
         actions = [
-            Action(label="Ordner öffnen", launch=session_dir.as_uri()),
+            Action(label="Open folder", launch=session_dir.as_uri()),
         ]
         if job_log.exists():
-            actions.insert(0, Action(label="Fehler-Log öffnen", launch=job_log.as_uri()))
+            actions.insert(0, Action(label="Open error log", launch=job_log.as_uri()))
         self.notifier.notify(
-            "Diktat fehlgeschlagen",
+            "Dictation failed",
             session_name,
             launch=session_dir.as_uri(),
             actions=actions,
@@ -401,9 +401,9 @@ class TrayApp:
         transcript = session_dir / "transcript.txt"
         preview = chunk_preview or session_name
         launch = transcript.as_uri() if transcript.exists() else session_dir.as_uri()
-        actions = [Action(label="Datei öffnen", launch=transcript.as_uri())]
+        actions = [Action(label="Open file", launch=transcript.as_uri())]
         self.notifier.notify(
-            "Notiz angehängt",
+            "Note appended",
             preview,
             launch=launch,
             actions=actions,
@@ -413,12 +413,12 @@ class TrayApp:
         session_dir = (self.cfg.output_dir / session_name).resolve()
         job_log = session_dir / "job.log"
         actions = [
-            Action(label="Ordner öffnen", launch=session_dir.as_uri()),
+            Action(label="Open folder", launch=session_dir.as_uri()),
         ]
         if job_log.exists():
-            actions.insert(0, Action(label="Fehler-Log öffnen", launch=job_log.as_uri()))
+            actions.insert(0, Action(label="Open error log", launch=job_log.as_uri()))
         self.notifier.notify(
-            "Notiz anhängen fehlgeschlagen",
+            "Note append failed",
             session_name,
             launch=session_dir.as_uri(),
             actions=actions,

@@ -79,7 +79,7 @@ class AudioCaptureThread:
             self.mic_device_name = mic.name
         except Exception as e:
             log.warning("No mic available: %s", e)
-            self.warnings.append("Mikrofon nicht verfügbar.")
+            self.warnings.append("Microphone not available.")
             return
         try:
             with self._open_wav(out_path) as wav, mic.recorder(
@@ -90,7 +90,7 @@ class AudioCaptureThread:
                     self._write_chunk(wav, data)
         except Exception:
             log.exception("Mic recording failed")
-            self.warnings.append("Mikrofon-Aufnahme abgebrochen.")
+            self.warnings.append("Microphone recording aborted.")
 
     def _run_system(self, out_path: Path) -> None:
         if self._audio_source == "apps":
@@ -100,7 +100,7 @@ class AudioCaptureThread:
             except ProcessLoopbackNotAvailable as e:
                 log.warning("Process loopback unavailable, falling back to 'all': %s", e)
                 self.warnings.append(
-                    "App-Filter nicht verfügbar — gesamtes System-Audio aufgenommen."
+                    "App filter unavailable — recording full system audio instead."
                 )
                 # fall through to default loopback
         try:
@@ -109,7 +109,7 @@ class AudioCaptureThread:
             loopback_mic = sc.get_microphone(id=str(spk.name), include_loopback=True)
         except Exception as e:
             log.warning("No loopback available: %s", e)
-            self.warnings.append("System-Audio (Loopback) nicht verfügbar.")
+            self.warnings.append("System audio (loopback) not available.")
             return
         try:
             with self._open_wav(out_path) as wav, loopback_mic.recorder(
@@ -120,7 +120,7 @@ class AudioCaptureThread:
                     self._write_chunk(wav, data)
         except Exception:
             log.exception("System recording failed")
-            self.warnings.append("System-Audio-Aufnahme abgebrochen.")
+            self.warnings.append("System audio recording aborted.")
 
     def _write_chunk(self, wav: wave.Wave_write, data: np.ndarray) -> None:
         """data is float32 from soundcard, shape (N, 1). Convert to int16."""
