@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -157,3 +158,22 @@ def test_status_warming_default_false(state_dir):
     )
     q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock())
     assert q.status().warming is False
+
+
+def test_status_last_finished_reads_payload(state_dir):
+    payload = {
+        "session_id": "2026-05-19_14-30-22",
+        "mode": "dictation",
+        "was_extend": True,
+        "success": True,
+        "chunk_preview": "Hello world",
+    }
+    (state_dir / "worker_status.json").write_text(
+        json.dumps({"running": None, "queued": [], "mode": None, "last_finished": payload}),
+        encoding="utf-8",
+    )
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock())
+    status = q.status()
+    assert status.last_finished == payload
+    assert status.last_finished["session_id"] == "2026-05-19_14-30-22"
+    assert status.last_finished["was_extend"] is True

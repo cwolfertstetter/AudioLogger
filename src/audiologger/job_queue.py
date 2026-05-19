@@ -18,6 +18,7 @@ class JobStatus:
     last_failed: Optional[str] = None
     mode: Optional[str] = None
     warming: bool = False
+    last_finished: Optional[dict] = None
 
 
 def _default_spawner(state_dir: Path, prewarm: bool = False) -> subprocess.Popen:
@@ -70,6 +71,7 @@ class TranscriptionJobQueue:
             queued: list[str] = []
             mode: Optional[str] = None
             warming = False
+            last_finished: Optional[dict] = None
         else:
             try:
                 data = json.loads(self._status_path.read_text(encoding="utf-8"))
@@ -79,6 +81,8 @@ class TranscriptionJobQueue:
             queued = list(data.get("queued", []))
             mode = data.get("mode", None)
             warming = bool(data.get("warming", False))
+            raw_lf = data.get("last_finished", None)
+            last_finished = raw_lf if isinstance(raw_lf, dict) else None
 
         last_failed: Optional[str] = None
         last_failed_path = self._state_dir / "last_failed.txt"
@@ -88,4 +92,11 @@ class TranscriptionJobQueue:
             except OSError:
                 pass
 
-        return JobStatus(running=running, queued=queued, last_failed=last_failed, mode=mode, warming=warming)
+        return JobStatus(
+            running=running,
+            queued=queued,
+            last_failed=last_failed,
+            mode=mode,
+            warming=warming,
+            last_finished=last_finished,
+        )
