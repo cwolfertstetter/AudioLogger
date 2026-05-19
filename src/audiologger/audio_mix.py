@@ -7,8 +7,10 @@ import numpy as np
 
 def _read_int16(path: Path) -> tuple[np.ndarray, int]:
     with wave.open(str(path), "rb") as w:
-        assert w.getsampwidth() == 2, "expected 16-bit"
-        assert w.getnchannels() == 1, "expected mono"
+        if w.getsampwidth() != 2:
+            raise ValueError("expected 16-bit WAV")
+        if w.getnchannels() != 1:
+            raise ValueError("expected mono WAV")
         frames = w.readframes(w.getnframes())
         sr = w.getframerate()
     return np.frombuffer(frames, dtype=np.int16), sr
@@ -45,7 +47,8 @@ def mix_to_file(mic_path: Path, system_path: Path, out_path: Path) -> None:
 
     mic, sr_mic = _read_int16(mic_path)
     sys_, sr_sys = _read_int16(system_path)
-    assert sr_mic == sr_sys, "sample rates must match"
+    if sr_mic != sr_sys:
+        raise ValueError(f"sample rates differ: mic={sr_mic}, sys={sr_sys}")
 
     n = max(len(mic), len(sys_))
     mic_padded = np.zeros(n, dtype=np.int32)
