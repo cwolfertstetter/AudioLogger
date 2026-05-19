@@ -14,6 +14,7 @@ poll loop, so the first job does not pay model-load latency.
 import argparse
 import json
 import logging
+import shutil
 import sys
 import time
 import traceback
@@ -22,6 +23,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from audiologger.audio_mix import append_wav
 from audiologger.config import Config, load_config
 from audiologger.paths import config_path
 from audiologger.segment import Segment
@@ -68,10 +70,17 @@ def _write_status(
     queued: list[str],
     mode: str | None = None,
     warming: bool = False,
+    last_finished: dict | None = None,
 ) -> None:
     status_path.write_text(
         json.dumps(
-            {"running": running, "queued": queued, "mode": mode, "warming": warming},
+            {
+                "running": running,
+                "queued": queued,
+                "mode": mode,
+                "warming": warming,
+                "last_finished": last_finished,
+            },
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -205,18 +214,43 @@ def _read_mode(session_dir: Path) -> str:
     return mode_file.read_text(encoding="utf-8").strip() or "meeting"
 
 
-def _process_session(session_dir: Path, pipeline: WhisperXPipeline, cfg: Config) -> None:
+def _process_session(session_dir: Path, pipeline: WhisperXPipeline, cfg: Config) -> dict:
+    """Process one session. Returns a last_finished payload dict."""
     log.info("Processing session %s", session_dir)
     mode = _read_mode(session_dir)
 
-    if mode == "dictation":
-        _process_dictation_session(session_dir, pipeline, cfg)
+    if mode == "dictation_extend":
+        target_name, success = _process_dictation_extend_session(session_dir, pipeline, cfg)
+        return {
+            "session_id": target_name,
+            "mode": "dictation",
+            "was_extend": True,
+            "success": success,
+        }
+    elif mode == "dictation":
+        chunk_preview = _process_dictation_session(session_dir, pipeline, cfg)
+        return {
+            "session_id": session_dir.name,
+            "mode": "dictation",
+            "was_extend": False,
+            "success": True,
+            "chunk_preview": chunk_preview,
+        }
     else:
         _process_meeting_session(session_dir, pipeline)
+        return {
+            "session_id": session_dir.name,
+            "mode": "meeting",
+            "was_extend": False,
+            "success": True,
+        }
 
 
-def _process_dictation_session(session_dir: Path, pipeline: WhisperXPipeline, cfg: Config) -> None:
-    """Fast mic-only transcription; plain text output; clipboard copy."""
+def _process_dictation_session(session_dir: Path, pipeline: WhisperXPipeline, cfg: Config) -> str:
+    """Fast mic-only transcription; plain text output; clipboard copy.
+
+    Returns chunk_preview (first 140 chars of joined text).
+    """
     mic_wav = session_dir / "mic.wav"
 
     segments = pipeline.transcribe(
@@ -250,6 +284,110 @@ def _process_dictation_session(session_dir: Path, pipeline: WhisperXPipeline, cf
         log.exception("Failed to copy dictation text to clipboard")
 
     log.info("Wrote transcript.txt and transcript.json for %s", session_dir.name)
+    chunk_preview = joined_text[:140] + "..." if len(joined_text) > 140 else joined_text
+    return chunk_preview
+
+
+def _process_dictation_extend_session(
+    session_dir: Path, pipeline: WhisperXPipeline, cfg: Config
+) -> tuple[str, bool]:
+    """Append a new chunk (audio + transcript) to the target dictation session.
+
+    Returns (target_session_name, success).
+    On success the temp session_dir is deleted.
+    On failure the temp dir is left intact for investigation.
+    """
+    target_txt = session_dir / "target_session.txt"
+    if not target_txt.exists():
+        msg = "target_session.txt missing in dictation_extend session"
+        log.error(msg)
+        (session_dir / "job.log").write_text(msg, encoding="utf-8")
+        return (session_dir.name, False)
+
+    target_dir = Path(target_txt.read_text(encoding="utf-8").strip())
+    if not target_dir.exists():
+        msg = f"Target session directory no longer exists: {target_dir}"
+        log.error(msg)
+        (session_dir / "job.log").write_text(msg, encoding="utf-8")
+        return (session_dir.name, False)
+
+    mic_wav = session_dir / "mic.wav"
+
+    try:
+        # 1. Transcribe new chunk
+        segments = pipeline.transcribe(
+            mic_wav,
+            diarize=False,
+            model_size=cfg.dictation_model,
+            align=False,
+        )
+
+        # 2. Offset timestamps by existing audio duration
+        existing_duration = _wav_duration_seconds(target_dir / "mic.wav")
+        offset_segments = [
+            Segment(
+                start=s.start + existing_duration,
+                end=s.end + existing_duration,
+                text=s.text,
+                speaker=s.speaker,
+            )
+            for s in segments
+        ]
+
+        new_text = " ".join(s.text for s in segments)
+
+        # 3. Append transcript text
+        existing_txt_path = target_dir / "transcript.txt"
+        if existing_txt_path.exists():
+            existing_txt = existing_txt_path.read_text(encoding="utf-8")
+            combined_txt = existing_txt.rstrip() + "\n\n" + new_text + "\n"
+        else:
+            combined_txt = new_text + "\n"
+        existing_txt_path.write_text(combined_txt, encoding="utf-8")
+
+        # 4. Update transcript.json
+        existing_json_path = target_dir / "transcript.json"
+        if existing_json_path.exists():
+            try:
+                existing_json = json.loads(existing_json_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                existing_json = {"segments": [], "mode": "dictation"}
+        else:
+            existing_json = {"segments": [], "mode": "dictation"}
+
+        all_segments = existing_json.get("segments", []) + [asdict(s) for s in offset_segments]
+        full_text = combined_txt.strip()
+        existing_json["segments"] = all_segments
+        existing_json["text"] = full_text
+        existing_json["mode"] = "dictation"
+        existing_json_path.write_text(
+            json.dumps(existing_json, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        # 5. Concatenate audio
+        target_mic = target_dir / "mic.wav"
+        append_wav(target_mic, mic_wav)
+
+        # 6. Copy new chunk text to clipboard
+        try:
+            import pyperclip
+            pyperclip.copy(new_text)
+            log.info("Extend chunk text copied to clipboard (%d chars)", len(new_text))
+        except Exception:
+            log.exception("Failed to copy extend text to clipboard")
+
+        log.info("Extend complete: appended chunk to %s", target_dir.name)
+
+        # 7. Clean up temp session
+        shutil.rmtree(session_dir)
+
+        chunk_preview = new_text[:140] + "..." if len(new_text) > 140 else new_text
+        return (target_dir.name, True)
+
+    except Exception:
+        log.error("dictation_extend failed for %s:\n%s", session_dir, traceback.format_exc())
+        (session_dir / "job.log").write_text(traceback.format_exc(), encoding="utf-8")
+        return (session_dir.name, False)
 
 
 def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> None:
@@ -347,37 +485,54 @@ def main(argv: list[str]) -> int:
         _write_status(status_path, running=None, queued=[], mode=None, warming=False)
 
     last_job_finished = datetime.now()
+    last_finished: dict | None = None
     while True:
         sessions = _read_pending(pending_path)
         if sessions:
             current = sessions[0]
             last_failed_path = state_dir / "last_failed.txt"
             current_mode = _read_mode(current)
-            _write_status(status_path, running=current.name, queued=[s.name for s in sessions[1:]], mode=current_mode)
-            job_failed = False
+            _write_status(
+                status_path,
+                running=current.name,
+                queued=[s.name for s in sessions[1:]],
+                mode=current_mode,
+                last_finished=last_finished,
+            )
             try:
-                _process_session(current, pipeline, cfg)
+                last_finished = _process_session(current, pipeline, cfg)
                 # M5: clear last_failed on success
                 last_failed_path.unlink(missing_ok=True)
             except Exception:
-                job_failed = True
                 log.error("Job failed for %s:\n%s", current, traceback.format_exc())
                 (current / "job.log").write_text(traceback.format_exc(), encoding="utf-8")
                 # M5: record the failed session name
                 last_failed_path.write_text(current.name, encoding="utf-8")
+                last_finished = {
+                    "session_id": current.name,
+                    "mode": current_mode,
+                    "was_extend": current_mode == "dictation_extend",
+                    "success": False,
+                }
             finally:
                 # Remove this session from pending whether success or failure
                 remaining = _read_pending(pending_path)
                 remaining = [p for p in remaining if p != current]
                 _write_pending(pending_path, remaining)
             last_job_finished = datetime.now()
-            _write_status(status_path, running=None, queued=[s.name for s in remaining], mode=None)
+            _write_status(
+                status_path,
+                running=None,
+                queued=[s.name for s in remaining],
+                mode=None,
+                last_finished=last_finished,
+            )
             continue
 
         # Idle -- exit after warm window
         if datetime.now() - last_job_finished > timedelta(seconds=warm_idle_seconds):
             log.info("Idle %s s, exiting", warm_idle_seconds)
-            _write_status(status_path, running=None, queued=[], mode=None)
+            _write_status(status_path, running=None, queued=[], mode=None, last_finished=last_finished)
             return 0
 
         time.sleep(POLL_INTERVAL_SECONDS)
