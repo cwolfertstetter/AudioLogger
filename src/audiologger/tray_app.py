@@ -17,7 +17,7 @@ from audiologger.controller import RecordingController, RecordingState
 from audiologger.hotkey import HotkeyManager
 from audiologger.icons import idle_icon, recording_icon, transcribing_icon
 from audiologger.job_queue import TranscriptionJobQueue
-from audiologger.notifications import Notifier
+from audiologger.notifications import Action, Notifier
 from audiologger.paths import appdata_dir, config_path
 from audiologger.recovery import find_orphaned_sessions
 
@@ -191,6 +191,8 @@ class TrayApp:
         from datetime import datetime
         long_warning_fired = False
         recording_started_at: datetime | None = None
+        prev_running: str | None = None
+        prev_last_failed: str | None = None
         while not self._stop_event.is_set():
             if self.controller.state is RecordingState.RECORDING:
                 if recording_started_at is None:
@@ -211,7 +213,50 @@ class TrayApp:
                     self._set_icon(transcribing_icon())
                 else:
                     self._set_icon(idle_icon())
+
+                # Detect transition: a session that was running is now done.
+                # Fire success or failure toast accordingly.
+                if prev_running is not None and prev_running != s.running:
+                    finished = prev_running
+                    if s.last_failed == finished and prev_last_failed != finished:
+                        self._notify_transcription_failed(finished)
+                    elif s.last_failed != finished:
+                        self._notify_transcription_done(finished)
+                prev_running = s.running
+                prev_last_failed = s.last_failed
             time.sleep(1.0)
+
+    def _notify_transcription_done(self, session_name: str) -> None:
+        session_dir = (self.cfg.output_dir / session_name).resolve()
+        transcript = session_dir / "transcript.md"
+        launch = transcript.as_uri() if transcript.exists() else session_dir.as_uri()
+        actions = [
+            Action(label="Transkript öffnen", launch=transcript.as_uri()),
+            Action(label="Ordner öffnen", launch=session_dir.as_uri()),
+        ] if transcript.exists() else [
+            Action(label="Ordner öffnen", launch=session_dir.as_uri()),
+        ]
+        self.notifier.notify(
+            "Transkription fertig",
+            session_name,
+            launch=launch,
+            actions=actions,
+        )
+
+    def _notify_transcription_failed(self, session_name: str) -> None:
+        session_dir = (self.cfg.output_dir / session_name).resolve()
+        job_log = session_dir / "job.log"
+        actions = [
+            Action(label="Ordner öffnen", launch=session_dir.as_uri()),
+        ]
+        if job_log.exists():
+            actions.insert(0, Action(label="Fehler-Log öffnen", launch=job_log.as_uri()))
+        self.notifier.notify(
+            "Transkription fehlgeschlagen",
+            session_name,
+            launch=session_dir.as_uri(),
+            actions=actions,
+        )
 
 
 def main() -> None:
