@@ -27,8 +27,8 @@ Install `uv`: <https://docs.astral.sh/uv/>
 
 Clone and install (GPU build):
 ```bash
-git clone <repo>
-cd audiologger
+git clone https://github.com/cwolfertstetter/AudioLogger.git
+cd AudioLogger
 uv venv
 uv pip install -e ".[gpu,dev]"
 # Install torch with CUDA support (adjust cu121 to match your CUDA version):
