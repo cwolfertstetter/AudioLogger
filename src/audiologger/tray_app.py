@@ -137,6 +137,8 @@ class TrayApp:
             return f"Transkribiert: {s.running}"
         if s.queued:
             return f"In Warteschlange: {len(s.queued)}"
+        if s.last_failed and not s.running and not s.queued:
+            return f"Letzte Aufnahme fehlgeschlagen: {s.last_failed}"
         return "Bereit"
 
     def _set_icon(self, image) -> None:

@@ -15,6 +15,7 @@ STATUS_FILE = "worker_status.json"
 class JobStatus:
     running: Optional[str] = None
     queued: list[str] = field(default_factory=list)
+    last_failed: Optional[str] = None
 
 
 def _default_spawner(state_dir: Path) -> subprocess.Popen:
@@ -54,12 +55,22 @@ class TranscriptionJobQueue:
 
     def status(self) -> JobStatus:
         if not self._status_path.exists():
-            return JobStatus()
-        try:
-            data = json.loads(self._status_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return JobStatus()
-        return JobStatus(
-            running=data.get("running"),
-            queued=list(data.get("queued", [])),
-        )
+            running = None
+            queued: list[str] = []
+        else:
+            try:
+                data = json.loads(self._status_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                data = {}
+            running = data.get("running")
+            queued = list(data.get("queued", []))
+
+        last_failed: Optional[str] = None
+        last_failed_path = self._state_dir / "last_failed.txt"
+        if last_failed_path.exists():
+            try:
+                last_failed = last_failed_path.read_text(encoding="utf-8").strip() or None
+            except OSError:
+                pass
+
+        return JobStatus(running=running, queued=queued, last_failed=last_failed)

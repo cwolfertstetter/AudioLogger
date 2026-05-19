@@ -75,3 +75,25 @@ def test_pending_file_created_on_first_enqueue(state_dir):
     assert not (state_dir / "pending.txt").exists()
     q.enqueue(Path("C:/recs/s1"))
     assert (state_dir / "pending.txt").exists()
+
+
+# --- M5: last_failed.txt reflected in JobStatus.last_failed ---------------
+
+def test_status_last_failed_when_file_present(state_dir):
+    (state_dir / "last_failed.txt").write_text("2026-05-18_14-32-15", encoding="utf-8")
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock())
+    status = q.status()
+    assert status.last_failed == "2026-05-18_14-32-15"
+
+
+def test_status_last_failed_none_when_file_absent(state_dir):
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock())
+    status = q.status()
+    assert status.last_failed is None
+
+
+def test_status_last_failed_none_when_file_empty(state_dir):
+    (state_dir / "last_failed.txt").write_text("", encoding="utf-8")
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock())
+    status = q.status()
+    assert status.last_failed is None
