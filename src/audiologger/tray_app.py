@@ -40,6 +40,7 @@ class TrayApp:
             enqueue_fn=self._on_recording_finished,
         )
         self.hotkey = HotkeyManager()
+        self.dictation_hotkey = HotkeyManager()
         self.icon: pystray.Icon | None = None
         self._stop_event = threading.Event()
 
@@ -47,7 +48,7 @@ class TrayApp:
 
     def run(self) -> None:
         self._handle_orphaned_sessions()
-        self._bind_hotkey()
+        self._bind_hotkeys()
         self.icon = pystray.Icon(
             "AudioLogger",
             icon=idle_icon(),
@@ -57,12 +58,18 @@ class TrayApp:
         threading.Thread(target=self._status_refresh_loop, daemon=True).start()
         self.icon.run()
 
-    def _bind_hotkey(self) -> None:
-        ok = self.hotkey.bind(self.cfg.hotkey, self._on_hotkey)
+    def _bind_hotkeys(self) -> None:
+        ok = self.hotkey.bind(self.cfg.hotkey, self._on_meeting_hotkey)
         if not ok:
             self.notifier.notify(
                 "Hotkey-Konflikt",
                 f"'{self.cfg.hotkey}' konnte nicht gebunden werden. Bitte in Tray ändern.",
+            )
+        ok2 = self.dictation_hotkey.bind(self.cfg.dictation_hotkey, self._on_dictation_hotkey)
+        if not ok2:
+            self.notifier.notify(
+                "Hotkey-Konflikt",
+                f"'{self.cfg.dictation_hotkey}' konnte nicht gebunden werden. Bitte in Tray ändern.",
             )
 
     def _handle_orphaned_sessions(self) -> None:
@@ -77,10 +84,10 @@ class TrayApp:
 
     # --- Hotkey + controller -------------------------------------------
 
-    def _on_hotkey(self) -> None:
+    def _on_meeting_hotkey(self) -> None:
         prev_state = self.controller.state
         try:
-            self.controller.toggle()
+            self.controller.toggle(mode="meeting")
         except Exception:
             log.exception("toggle failed")
             self.notifier.notify("Fehler", "Aufnahme konnte nicht (be)endet werden — siehe Logs.")
@@ -93,6 +100,22 @@ class TrayApp:
             self.notifier.notify("Aufnahme beendet", "Transkription läuft...")
             self._set_icon(transcribing_icon())
 
+    def _on_dictation_hotkey(self) -> None:
+        prev_state = self.controller.state
+        try:
+            self.controller.toggle(mode="dictation")
+        except Exception:
+            log.exception("toggle failed")
+            self.notifier.notify("Fehler", "Diktat konnte nicht (be)endet werden — siehe Logs.")
+            return
+        new_state = self.controller.state
+        if prev_state is RecordingState.IDLE and new_state is RecordingState.RECORDING:
+            self.notifier.notify("Diktat gestartet", "Hotkey erneut drücken zum Stoppen.")
+            self._set_icon(recording_icon())
+        elif prev_state is RecordingState.RECORDING and new_state is RecordingState.IDLE:
+            self.notifier.notify("Diktat beendet", "Transkription läuft...")
+            self._set_icon(transcribing_icon())
+
     def _on_recording_finished(self, session_dir: Path) -> None:
         """Called by controller after stop. Hand off to queue."""
         self.queue.enqueue(session_dir)
@@ -103,7 +126,8 @@ class TrayApp:
         return Menu(
             MenuItem(lambda _: f"Status: {self._status_text()}", None, enabled=False),
             Menu.SEPARATOR,
-            MenuItem("Aufnahme starten/stoppen", lambda _: self._on_hotkey()),
+            MenuItem("Aufnahme starten/stoppen", lambda _: self._on_meeting_hotkey()),
+            MenuItem("Diktat starten/stoppen", lambda _: self._on_dictation_hotkey()),
             Menu.SEPARATOR,
             MenuItem("Output-Ordner ändern...", lambda _: self._pick_output_dir()),
             MenuItem(
@@ -181,6 +205,7 @@ class TrayApp:
 
     def _quit(self) -> None:
         self.hotkey.unbind()
+        self.dictation_hotkey.unbind()
         self._stop_event.set()
         if self.icon is not None:
             self.icon.stop()
@@ -218,13 +243,28 @@ class TrayApp:
                 # Fire success or failure toast accordingly.
                 if prev_running is not None and prev_running != s.running:
                     finished = prev_running
+                    session_dir = (self.cfg.output_dir / finished).resolve()
+                    finished_mode = self._read_session_mode(session_dir)
                     if s.last_failed == finished and prev_last_failed != finished:
-                        self._notify_transcription_failed(finished)
+                        if finished_mode == "dictation":
+                            self._notify_dictation_failed(finished)
+                        else:
+                            self._notify_transcription_failed(finished)
                     elif s.last_failed != finished:
-                        self._notify_transcription_done(finished)
+                        if finished_mode == "dictation":
+                            self._notify_dictation_done(finished)
+                        else:
+                            self._notify_transcription_done(finished)
                 prev_running = s.running
                 prev_last_failed = s.last_failed
             time.sleep(1.0)
+
+    def _read_session_mode(self, session_dir: Path) -> str:
+        """Read mode.txt from a session dir. Returns 'meeting' if missing."""
+        mode_file = session_dir / "mode.txt"
+        if not mode_file.exists():
+            return "meeting"
+        return mode_file.read_text(encoding="utf-8").strip() or "meeting"
 
     def _notify_transcription_done(self, session_name: str) -> None:
         session_dir = (self.cfg.output_dir / session_name).resolve()
@@ -253,6 +293,40 @@ class TrayApp:
             actions.insert(0, Action(label="Fehler-Log öffnen", launch=job_log.as_uri()))
         self.notifier.notify(
             "Transkription fehlgeschlagen",
+            session_name,
+            launch=session_dir.as_uri(),
+            actions=actions,
+        )
+
+    def _notify_dictation_done(self, session_name: str) -> None:
+        session_dir = (self.cfg.output_dir / session_name).resolve()
+        transcript = session_dir / "transcript.txt"
+        preview = ""
+        if transcript.exists():
+            try:
+                text = transcript.read_text(encoding="utf-8")
+                preview = text[:140] + "..." if len(text) > 140 else text
+            except OSError:
+                preview = ""
+        launch = transcript.as_uri() if transcript.exists() else session_dir.as_uri()
+        actions = [Action(label="Datei öffnen", launch=transcript.as_uri())]
+        self.notifier.notify(
+            "Diktat fertig",
+            preview or session_name,
+            launch=launch,
+            actions=actions,
+        )
+
+    def _notify_dictation_failed(self, session_name: str) -> None:
+        session_dir = (self.cfg.output_dir / session_name).resolve()
+        job_log = session_dir / "job.log"
+        actions = [
+            Action(label="Ordner öffnen", launch=session_dir.as_uri()),
+        ]
+        if job_log.exists():
+            actions.insert(0, Action(label="Fehler-Log öffnen", launch=job_log.as_uri()))
+        self.notifier.notify(
+            "Diktat fehlgeschlagen",
             session_name,
             launch=session_dir.as_uri(),
             actions=actions,
