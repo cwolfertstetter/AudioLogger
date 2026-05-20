@@ -249,6 +249,8 @@ class TrayApp:
             MenuItem("Start/Stop Dictation", lambda _: self._on_dictation_hotkey()),
             MenuItem("Append Note (Extend)", lambda _: self._on_extend_hotkey()),
             Menu.SEPARATOR,
+            MenuItem("Open Output Folder", lambda _: self._open_output_dir()),
+            MenuItem("Open Last Recording", lambda _: self._open_last_recording()),
             MenuItem("Change Output Folder...", lambda _: self._pick_output_dir()),
             MenuItem(
                 "Audio Source",
@@ -359,6 +361,46 @@ class TrayApp:
             log.exception("Failed to save new output_dir")
             self.notifier.notify(
                 "Output folder NOT saved",
+                "See %APPDATA%/AudioLogger/tray.log for details.",
+            )
+
+    def _open_output_dir(self) -> None:
+        try:
+            out = self.cfg.output_dir.resolve()
+            out.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(out))
+        except Exception:
+            log.exception("Failed to open output directory")
+            self.notifier.notify(
+                "Could not open output folder",
+                "See %APPDATA%/AudioLogger/tray.log for details.",
+            )
+
+    def _open_last_recording(self) -> None:
+        try:
+            out = self.cfg.output_dir.resolve()
+            if not out.exists():
+                self.notifier.notify("No recordings", f"{out} does not exist.")
+                return
+            sessions = sorted(
+                [d for d in out.iterdir() if d.is_dir()],
+                key=lambda p: p.name,
+            )
+            if not sessions:
+                self.notifier.notify("No recordings", "Output folder is empty.")
+                return
+            last = sessions[-1]
+            # Prefer opening the transcript itself if it exists; fall back to the folder.
+            for fname in ("transcript.md", "transcript.txt"):
+                f = last / fname
+                if f.exists():
+                    os.startfile(str(f))
+                    return
+            os.startfile(str(last))
+        except Exception:
+            log.exception("Failed to open last recording")
+            self.notifier.notify(
+                "Could not open last recording",
                 "See %APPDATA%/AudioLogger/tray.log for details.",
             )
 
