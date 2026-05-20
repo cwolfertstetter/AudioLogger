@@ -336,17 +336,31 @@ class TrayApp:
             self.icon.icon = image
 
     def _pick_output_dir(self) -> None:
-        # Use tkinter folder picker (built-in)
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        chosen = filedialog.askdirectory(initialdir=str(self.cfg.output_dir))
-        root.destroy()
-        if chosen:
+        """Show a native Windows folder picker. Thread-safe (unlike tkinter)."""
+        try:
+            chosen = _pick_folder_native(
+                title="Select output folder",
+                initial=str(self.cfg.output_dir.resolve()),
+            )
+        except Exception:
+            log.exception("Folder picker failed")
+            self.notifier.notify(
+                "Folder picker failed",
+                "See %APPDATA%/AudioLogger/tray.log for details.",
+            )
+            return
+        if not chosen:
+            return  # user cancelled
+        try:
             self.cfg.output_dir = Path(chosen)
             save_config(config_path(), self.cfg)
             self.notifier.notify("Output folder changed", chosen)
+        except Exception:
+            log.exception("Failed to save new output_dir")
+            self.notifier.notify(
+                "Output folder NOT saved",
+                "See %APPDATA%/AudioLogger/tray.log for details.",
+            )
 
     def _set_audio_source(self, source: str) -> None:
         self.cfg.audio_source = source
@@ -562,9 +576,119 @@ class TrayApp:
         )
 
 
+# ---------------------------------------------------------------------------
+# Native Windows folder picker (thread-safe; tkinter is not).
+# ---------------------------------------------------------------------------
+
+def _pick_folder_native(*, title: str, initial: str) -> str | None:
+    """Show Windows native folder browser. Returns chosen path or None on cancel.
+
+    Uses SHBrowseForFolderW + SHGetPathFromIDListW from shell32.dll via ctypes.
+    Safe to call from any thread (unlike tkinter, which insists on the main thread).
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    BIF_RETURNONLYFSDIRS = 0x00000001
+    BIF_NEWDIALOGSTYLE = 0x00000040
+    BIF_EDITBOX = 0x00000010
+    BFFM_INITIALIZED = 1
+    BFFM_SETSELECTIONW = 0x400 + 103
+    MAX_PATH = 260
+
+    BFFCALLBACK = ctypes.WINFUNCTYPE(
+        ctypes.c_int, wintypes.HWND, wintypes.UINT, wintypes.LPARAM, wintypes.LPARAM
+    )
+
+    class BROWSEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("hwndOwner", wintypes.HWND),
+            ("pidlRoot", ctypes.c_void_p),
+            ("pszDisplayName", wintypes.LPWSTR),
+            ("lpszTitle", wintypes.LPCWSTR),
+            ("ulFlags", wintypes.UINT),
+            ("lpfn", BFFCALLBACK),
+            ("lParam", wintypes.LPARAM),
+            ("iImage", ctypes.c_int),
+        ]
+
+    shell32 = ctypes.windll.shell32
+    ole32 = ctypes.windll.ole32
+    user32 = ctypes.windll.user32  # noqa: F841
+
+    shell32.SHBrowseForFolderW.restype = ctypes.c_void_p
+    shell32.SHGetPathFromIDListW.argtypes = [ctypes.c_void_p, wintypes.LPWSTR]
+    shell32.SHGetPathFromIDListW.restype = wintypes.BOOL
+
+    # Callback to preselect the initial path
+    def _callback(hwnd, msg, lparam, data):
+        if msg == BFFM_INITIALIZED and data:
+            user32.SendMessageW(hwnd, BFFM_SETSELECTIONW, 1, data)
+        return 0
+
+    cb = BFFCALLBACK(_callback)
+    initial_buf = ctypes.create_unicode_buffer(initial)
+
+    display = ctypes.create_unicode_buffer(MAX_PATH)
+    bi = BROWSEINFOW()
+    bi.hwndOwner = None
+    bi.pidlRoot = None
+    bi.pszDisplayName = ctypes.cast(display, wintypes.LPWSTR)
+    bi.lpszTitle = title
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX
+    bi.lpfn = cb
+    bi.lParam = ctypes.cast(initial_buf, ctypes.c_void_p).value or 0
+    bi.iImage = 0
+
+    # COM apartment init — required for SHBrowseForFolderW from non-main threads
+    ole32.CoInitialize(None)
+    try:
+        pidl = shell32.SHBrowseForFolderW(ctypes.byref(bi))
+        if not pidl:
+            return None  # cancelled
+        path_buf = ctypes.create_unicode_buffer(MAX_PATH)
+        ok = shell32.SHGetPathFromIDListW(pidl, path_buf)
+        ole32.CoTaskMemFree(pidl)
+        if not ok:
+            return None
+        return path_buf.value or None
+    finally:
+        ole32.CoUninitialize()
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+def _setup_tray_logging() -> Path:
+    """Write tray logs to %APPDATA%/AudioLogger/tray.log and install excepthook."""
+    log_path = appdata_dir() / "tray.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        handlers=[
+            logging.FileHandler(log_path, encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
+    # Log any uncaught exception before the process dies
+    def _excepthook(exc_type, exc_value, tb):
+        logging.getLogger("tray_app").critical(
+            "UNCAUGHT EXCEPTION", exc_info=(exc_type, exc_value, tb)
+        )
+    sys.excepthook = _excepthook
+    return log_path
+
+
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    TrayApp().run()
+    log_path = _setup_tray_logging()
+    log.info("AudioLogger tray starting — log: %s", log_path)
+    try:
+        TrayApp().run()
+    except Exception:
+        log.exception("Tray crashed")
+        raise
 
 
 if __name__ == "__main__":
