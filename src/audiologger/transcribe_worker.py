@@ -148,6 +148,20 @@ class WhisperXPipeline:
 
         import whisperx
         audio = whisperx.load_audio(str(audio_path))
+
+        # Guard against empty / near-empty audio (e.g. a stream whose device
+        # dropped out mid-recording, leaving only a WAV header). whisperx uses
+        # 16 kHz internally; anything under ~0.1 s can't be transcribed and would
+        # crash the VAD with "'waveform' must be provided as a (channel, time)".
+        MIN_SAMPLES = 1600  # 0.1 s at 16 kHz
+        if getattr(audio, "size", 0) < MIN_SAMPLES:
+            log.warning(
+                "Audio %s has too few samples (%s) — skipping transcription of this stream",
+                audio_path.name,
+                getattr(audio, "size", 0),
+            )
+            return []
+
         result = whisper_model.transcribe(audio, batch_size=16)
 
         if align:
