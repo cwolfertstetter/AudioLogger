@@ -261,3 +261,63 @@ def test_extend_mode_with_previous_writes_target_marker(cfg):
     assert target_txt.exists()
     target_path = Path(target_txt.read_text(encoding="utf-8").strip())
     assert target_path == prior
+
+
+# --- Capture warnings surfaced to the user (not just the file) -----------
+
+def test_capture_warnings_passed_to_notify_fn(cfg):
+    """_stop() hands session dir + warnings to notify_fn so the user sees them."""
+    notify = MagicMock()
+    controller = RecordingController(
+        config=cfg,
+        capture_factory=FakeCaptureWithWarnings,
+        mix_fn=MagicMock(),
+        enqueue_fn=MagicMock(),
+        clock=lambda: datetime(2026, 5, 18, 14, 32, 15),
+        notify_fn=notify,
+    )
+    controller.toggle()  # start
+    session = cfg.output_dir / "2026-05-18_14-32-15"
+    controller.toggle()  # stop
+
+    notify.assert_called_once_with(
+        session,
+        ["Mikrofon nicht verfügbar.",
+         "App-Filter nicht verfügbar — gesamtes System-Audio aufgenommen."],
+    )
+
+
+def test_notify_fn_not_called_when_no_warnings(cfg):
+    """A clean recording must not fire a warning toast."""
+    notify = MagicMock()
+    controller = RecordingController(
+        config=cfg,
+        capture_factory=FakeCapture,
+        mix_fn=MagicMock(),
+        enqueue_fn=MagicMock(),
+        clock=lambda: datetime(2026, 5, 18, 14, 32, 15),
+        notify_fn=notify,
+    )
+    controller.toggle()  # start
+    controller.toggle()  # stop
+    notify.assert_not_called()
+
+
+def test_failing_notify_fn_does_not_break_the_stop_path(cfg):
+    """A broken notifier must not cost the user the transcription."""
+    enqueue = MagicMock()
+    controller = RecordingController(
+        config=cfg,
+        capture_factory=FakeCaptureWithWarnings,
+        mix_fn=MagicMock(),
+        enqueue_fn=enqueue,
+        clock=lambda: datetime(2026, 5, 18, 14, 32, 15),
+        notify_fn=MagicMock(side_effect=RuntimeError("toast backend exploded")),
+    )
+    controller.toggle()  # start
+    session = cfg.output_dir / "2026-05-18_14-32-15"
+    controller.toggle()  # stop — notifier raises
+
+    assert controller.state is RecordingState.IDLE
+    assert not (session / MARKER_FILENAME).exists()
+    enqueue.assert_called_once_with(session)

@@ -66,3 +66,14 @@ Automated tests cover state machines and pure functions. The following scenarios
 3. Start AudioLogger.
 4. Press F8 from a foreground app.
 5. **Expected:** Recording starts.
+
+### TC-9: Capture warning is visible after stopping
+1. Unplug/disable the default microphone (Sound settings → disable the input device).
+2. Start a meeting recording, let it run ~10 s, stop.
+3. **Expected:** A "Recording warning" toast appears immediately on stop, naming the
+   failed channel (e.g. "Microphone not available." or "Microphone recording aborted.").
+4. Click **Open details** → `capture_warnings.txt` opens with the same text.
+5. Click **Open folder** (or the toast body) → the session folder opens.
+6. **Expected:** `%APPDATA%/AudioLogger/tray.log` also contains a `Capture warning for <session>: ...` line.
+7. Re-enable the mic, record again, stop.
+8. **Expected:** No warning toast for the clean recording.

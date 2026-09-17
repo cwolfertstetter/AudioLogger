@@ -28,6 +28,9 @@ class CaptureLike(Protocol):
 CaptureFactory = Callable[[Path, int, str, list[str], bool], CaptureLike]
 """(session_dir, sample_rate, audio_source, filtered_app_names, mic_only) -> CaptureLike"""
 
+NotifyFn = Callable[[Path, list[str]], None]
+"""(session_dir, warnings) -> None — surfaces capture warnings to the user."""
+
 
 class RecordingController:
     SAMPLE_RATE = 48000
@@ -40,12 +43,14 @@ class RecordingController:
         mix_fn: Callable[[Path, Path, Path], None],
         enqueue_fn: Callable[[Path], None],
         clock: Callable[[], datetime] = datetime.now,
+        notify_fn: NotifyFn | None = None,
     ):
         self._config = config
         self._capture_factory = capture_factory
         self._mix_fn = mix_fn
         self._enqueue_fn = enqueue_fn
         self._clock = clock
+        self._notify_fn = notify_fn
         self._state = RecordingState.IDLE
         self._current_capture: CaptureLike | None = None
         self._current_session: Path | None = None
@@ -113,10 +118,13 @@ class RecordingController:
         capture.stop()
 
         # C1: write capture warnings before dropping reference
-        if capture.warnings:
+        warnings = list(capture.warnings)
+        if warnings:
+            for w in warnings:
+                log.warning("Capture warning for %s: %s", session.name, w)
             try:
                 (session / "capture_warnings.txt").write_text(
-                    "\n".join(capture.warnings) + "\n", encoding="utf-8"
+                    "\n".join(warnings) + "\n", encoding="utf-8"
                 )
             except OSError:
                 log.exception("Failed to write capture_warnings.txt")
@@ -127,6 +135,14 @@ class RecordingController:
         self._current_session = None
         self._current_mode = None
         self._state = RecordingState.IDLE
+
+        # C3: surface the warnings. capture_warnings.txt alone went unread for
+        # 2.5 months while the mic channel was dead, so tell the user directly.
+        if warnings and self._notify_fn is not None:
+            try:
+                self._notify_fn(session, warnings)
+            except Exception:
+                log.exception("Failed to surface capture warnings for %s", session)
 
         mic = session / "mic.wav"
         sysw = session / "system.wav"

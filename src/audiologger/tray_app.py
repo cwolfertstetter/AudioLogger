@@ -39,6 +39,7 @@ class TrayApp:
             capture_factory=AudioCaptureThread,
             mix_fn=mix_to_file,
             enqueue_fn=self._on_recording_finished,
+            notify_fn=self._notify_capture_warnings,
         )
         self.hotkey = HotkeyManager()
         self.dictation_hotkey = HotkeyManager()
@@ -614,6 +615,21 @@ class TrayApp:
             "Note append failed",
             session_name,
             launch=session_dir.as_uri(),
+            actions=actions,
+        )
+
+    def _notify_capture_warnings(self, session_dir: Path, warnings: list[str]) -> None:
+        """Surface AudioCaptureThread warnings right after the recording stops."""
+        session_dir = session_dir.resolve()
+        folder_uri = session_dir.as_uri()
+        actions = [Action(label="Open folder", launch=folder_uri)]
+        details = session_dir / "capture_warnings.txt"
+        if details.exists():
+            actions.insert(0, Action(label="Open details", launch=details.as_uri()))
+        self.notifier.notify(
+            "Recording warning",
+            "\n".join(warnings),
+            launch=folder_uri,
             actions=actions,
         )
 
