@@ -7,6 +7,10 @@ from pathlib import Path
 import numpy as np
 import soundcard as sc
 
+from audiologger.mic_capture import (
+    MicrophoneNotAvailable,
+    record_microphone,
+)
 from audiologger.process_loopback import (
     ProcessLoopbackNotAvailable,
     record_app_loopback,
@@ -74,23 +78,29 @@ class AudioCaptureThread:
         return w
 
     def _run_mic(self, out_path: Path) -> None:
+        """Capture the default mic via PortAudio.
+
+        soundcard cannot open devices that report a plain WAVE_FORMAT_IEEE_FLOAT
+        mix format (common on USB headsets) -- see mic_capture for details.
+        """
         try:
-            mic = sc.default_microphone()
-            self.mic_device_name = mic.name
-        except Exception as e:
+            result = record_microphone(out_path, self._sr, self._stop)
+        except MicrophoneNotAvailable as e:
             log.warning("No mic available: %s", e)
-            self.warnings.append("Microphone not available.")
+            self.warnings.append(f"Microphone not available: {e}")
             return
-        try:
-            with self._open_wav(out_path) as wav, mic.recorder(
-                samplerate=self._sr, channels=[0]
-            ) as rec:
-                while not self._stop.is_set():
-                    data = rec.record(numframes=self._sr * CHUNK_SECONDS)
-                    self._write_chunk(wav, data)
         except Exception:
             log.exception("Mic recording failed")
             self.warnings.append("Microphone recording aborted.")
+            return
+
+        self.mic_device_name = result.device_name
+        if result.frames == 0:
+            log.warning("Microphone %r produced no audio", result.device_name)
+            self.warnings.append(
+                f"Microphone {result.device_name!r} captured no audio — check that "
+                "the right device is selected in Windows and is not muted."
+            )
 
     def _run_system(self, out_path: Path) -> None:
         if self._audio_source == "apps":
