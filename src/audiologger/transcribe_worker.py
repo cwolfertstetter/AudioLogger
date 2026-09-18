@@ -20,6 +20,8 @@ import time
 import traceback
 import wave
 from dataclasses import asdict, dataclass
+
+import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -92,6 +94,57 @@ def _wav_duration_seconds(path: Path) -> float:
         return 0.0
     with wave.open(str(path), "rb") as w:
         return w.getnframes() / w.getframerate()
+
+
+
+def normalize_for_transcription(
+    audio: "np.ndarray",
+    sample_rate: int = 16000,
+    *,
+    target_rms_dbfs: float = -20.0,
+    ceiling_dbfs: float = -1.0,
+    max_gain_db: float = 30.0,
+) -> "np.ndarray":
+    """Boost a quiet track to a usable speech level for Whisper.
+
+    The mic track runs ~23 dB below the system track, and Whisper starts
+    inventing text when it is fed near-silence.  The gain is derived from the
+    speech in the track, not from the whole track: the mic is ~90% silence, so
+    a plain RMS would measure mostly nothing and ask for absurd gain.
+
+    Only ever boosts, never attenuates, never exceeds `ceiling_dbfs`, and never
+    applies more than `max_gain_db` so a bare noise floor stays a noise floor.
+    Returns the input unchanged when no gain is warranted.  Operates on the
+    array handed to the model; the WAV on disk is not touched.
+    """
+    if audio is None or len(audio) == 0:
+        return audio
+    a = np.asarray(audio, dtype=np.float32)
+    peak = float(np.max(np.abs(a)))
+    if peak <= 0.0:
+        return audio
+
+    # Frame into 100 ms windows and keep the ones carrying signal (within 20 dB
+    # of the loudest frame), so silence does not drag the measurement down.
+    win = max(1, int(sample_rate * 0.1))
+    if len(a) >= win:
+        frames = a[: len(a) // win * win].reshape(-1, win).astype(np.float64)
+        frame_rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    else:
+        frame_rms = np.array([np.sqrt(np.mean(a.astype(np.float64) ** 2))])
+    speech = frame_rms[frame_rms >= frame_rms.max() * 0.1]
+    speech_rms = float(np.sqrt(np.mean(speech ** 2))) if speech.size else 0.0
+    if speech_rms <= 0.0:
+        return audio
+
+    to_db = lambda x: 20.0 * np.log10(max(x, 1e-12))
+    gain_db = min(target_rms_dbfs - to_db(speech_rms), ceiling_dbfs - to_db(peak))
+    gain_db = float(np.clip(gain_db, 0.0, max_gain_db))
+    if gain_db <= 0.0:
+        return audio
+
+    log.info("Boosting quiet audio by %.1f dB before transcription", gain_db)
+    return np.clip(a * (10.0 ** (gain_db / 20.0)), -1.0, 1.0).astype(np.float32)
 
 
 @dataclass(frozen=True)
@@ -171,6 +224,12 @@ class WhisperXPipeline:
                 getattr(audio, "size", 0),
             )
             return TranscriptionResult([], None)
+
+        # Whisper invents text when fed near-silence, and the mic track runs
+        # ~23 dB below the system track.  Lift it to a usable speech level
+        # first; whisperx.load_audio always returns 16 kHz mono.  The WAV on
+        # disk is untouched -- only the array handed to the model changes.
+        audio = normalize_for_transcription(audio)
 
         kwargs: dict = {"batch_size": 16}
         if language:
