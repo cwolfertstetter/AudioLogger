@@ -165,3 +165,35 @@ def test_reports_the_detected_language_even_though_alignment_replaces_the_result
     result = pipeline.transcribe(audio, diarize=False, align=True)
 
     assert result.language == "en"
+
+
+# --- a silent system track has no language to lend ---------------------------
+# Recording alone leaves system.wav digitally silent. Whisper still names a
+# language for it -- "en" at 0.31 confidence -- and since "en" is truthy it was
+# passed on to the mic track, so German speech came back as English prose.
+# Nothing was transcribed from that track, so it has nothing to say about
+# language either.
+
+class SilentSystemPipeline(FakePipeline):
+    """System track yields no segments at all, but still names a language."""
+
+    def transcribe(self, audio_path, *, diarize, model_size=None, align=True, language=None):
+        from audiologger.transcribe_worker import TranscriptionResult
+
+        self.calls.append((Path(audio_path).name, language))
+        if Path(audio_path).name == "system.wav":
+            return TranscriptionResult(segments=[], language="en")
+        return TranscriptionResult(
+            segments=[Segment(start=0.0, end=1.0, text="hallo", speaker="Others")],
+            language=language or self._detected,
+        )
+
+
+def test_a_system_track_without_speech_does_not_dictate_the_mic_language(session):
+    pipe = SilentSystemPipeline(detected="de", language="de")
+
+    _process_meeting_session(session, pipe)
+
+    assert pipe.calls[1] == ("mic.wav", "de"), (
+        "mic must fall back to the configured language, not the guess made on silence"
+    )

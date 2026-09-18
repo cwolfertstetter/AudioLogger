@@ -671,8 +671,13 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
     if not pipeline.diarization_enabled:
         warnings.append("Diarization disabled or unavailable — all speakers labelled 'Others'.")
 
+    # Only a track that actually produced speech has a language worth borrowing.
+    # Recording alone leaves system.wav digitally silent, and whisper still names
+    # a language for it -- "en" at 0.31 confidence -- which then got forced onto
+    # the mic and turned German speech into English prose.
+    inherited = sys_result.language if sys_result.segments else None
     mic_result = pipeline.transcribe(
-        mic_wav, diarize=False, language=sys_result.language or pipeline.language
+        mic_wav, diarize=False, language=inherited or pipeline.language
     )
     mic_segments = _force_speaker(mic_result.segments, "Me")
 
