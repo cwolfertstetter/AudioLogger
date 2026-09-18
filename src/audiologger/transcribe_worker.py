@@ -97,6 +97,29 @@ def _wav_duration_seconds(path: Path) -> float:
 
 
 
+def _speech_level(audio: "np.ndarray", sample_rate: int) -> float:
+    """RMS of the frames carrying signal, ignoring the silence between them.
+
+    A plain RMS is useless here: the mic track is ~90% silence, so it would
+    measure mostly nothing.  Frame into 100 ms windows and keep those within
+    20 dB of the loudest.  Returns 0.0 for empty or digitally silent audio.
+    """
+    a = np.asarray(audio, dtype=np.float32)
+    if a.size == 0:
+        return 0.0
+    win = max(1, int(sample_rate * 0.1))
+    if len(a) >= win:
+        frames = a[: len(a) // win * win].reshape(-1, win).astype(np.float64)
+        frame_rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    else:
+        frame_rms = np.array([np.sqrt(np.mean(a.astype(np.float64) ** 2))])
+    loudest = float(frame_rms.max())
+    if loudest <= 0.0:
+        return 0.0
+    speech = frame_rms[frame_rms >= loudest * 0.1]
+    return float(np.sqrt(np.mean(speech ** 2))) if speech.size else 0.0
+
+
 def normalize_for_transcription(
     audio: "np.ndarray",
     sample_rate: int = 16000,
@@ -124,16 +147,7 @@ def normalize_for_transcription(
     if peak <= 0.0:
         return audio
 
-    # Frame into 100 ms windows and keep the ones carrying signal (within 20 dB
-    # of the loudest frame), so silence does not drag the measurement down.
-    win = max(1, int(sample_rate * 0.1))
-    if len(a) >= win:
-        frames = a[: len(a) // win * win].reshape(-1, win).astype(np.float64)
-        frame_rms = np.sqrt(np.mean(frames ** 2, axis=1))
-    else:
-        frame_rms = np.array([np.sqrt(np.mean(a.astype(np.float64) ** 2))])
-    speech = frame_rms[frame_rms >= frame_rms.max() * 0.1]
-    speech_rms = float(np.sqrt(np.mean(speech ** 2))) if speech.size else 0.0
+    speech_rms = _speech_level(a, sample_rate)
     if speech_rms <= 0.0:
         return audio
 
@@ -145,6 +159,58 @@ def normalize_for_transcription(
 
     log.info("Boosting quiet audio by %.1f dB before transcription", gain_db)
     return np.clip(a * (10.0 ** (gain_db / 20.0)), -1.0, 1.0).astype(np.float32)
+
+
+
+def drop_silent_segments(
+    segments: list[Segment],
+    audio: "np.ndarray",
+    sample_rate: int = 16000,
+    *,
+    threshold_db: float = -25.0,
+) -> list[Segment]:
+    """Throw away segments that sit on silence.
+
+    Whisper does not stay quiet when there is nothing to transcribe -- it drops
+    boilerplate from its training data onto silent stretches ("Vielen Dank.",
+    "Untertitel 2.97", subtitle credits).  Pinning the language and normalizing
+    do not help: they make it understand the right thing, not stay silent.
+
+    So compare each segment against the audio underneath it.  Anything more
+    than `threshold_db` below the track's own speech level is not speech.
+    Returns the segments untouched when there is nothing to compare against,
+    so a silent track never silently loses its whole transcript.
+
+    The default threshold is calibrated on three real recordings: genuine
+    speech reached -22.7 dB below the track's speech level, while invented
+    segments started at -27.8 dB and ran down to -60 dB.  -25 dB sits in that
+    gap with ~3 dB of margin either way.  It cannot catch boilerplate that
+    lands on top of real audio ("Untertitel 2.97" sat at -6.7 dB); no level
+    test can.
+    """
+    if not segments:
+        return []
+    a = np.asarray(audio, dtype=np.float32) if audio is not None else np.zeros(0, dtype=np.float32)
+    if a.size == 0:
+        return list(segments)
+    level = _speech_level(a, sample_rate)
+    if level <= 0.0:
+        return list(segments)
+
+    floor = level * (10.0 ** (threshold_db / 20.0))
+    kept: list[Segment] = []
+    for seg in segments:
+        start = max(0, int(seg.start * sample_rate))
+        end = min(len(a), int(seg.end * sample_rate))
+        if end <= start:
+            log.info("Dropping segment at %.1fs (past end of audio): %r", seg.start, seg.text[:40])
+            continue
+        window = a[start:end].astype(np.float64)
+        if float(np.sqrt(np.mean(window ** 2))) >= floor:
+            kept.append(seg)
+        else:
+            log.info("Dropping segment at %.1fs on silence: %r", seg.start, seg.text[:40])
+    return kept
 
 
 @dataclass(frozen=True)
@@ -255,9 +321,11 @@ class WhisperXPipeline:
                 diarize_segments = self._diarize(audio)
                 result = whisperx.assign_word_speakers(diarize_segments, result)
 
-        return TranscriptionResult(
-            self._to_segments(result, diarize), result.get("language") or language
-        )
+        # Whisper drops training-data boilerplate onto silence; compare each
+        # segment against the audio underneath it.  `audio` is the normalized
+        # array, but the gain is uniform so the comparison is unaffected.
+        segments = drop_silent_segments(self._to_segments(result, diarize), audio)
+        return TranscriptionResult(segments, result.get("language") or language)
 
     def _to_segments(self, result: dict, diarize: bool) -> list[Segment]:
         segments: list[Segment] = []
