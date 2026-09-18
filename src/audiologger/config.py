@@ -13,6 +13,9 @@ class Config:
     whisper_model: str = "large-v3"
     device: str = "cuda"
     compute_type: str = "float16"
+    # Fallback language. WhisperX auto-detects per file, but the mic track is
+    # mostly silence and detection there is unreliable -- see transcribe_worker.
+    language: str = "de"
     diarization_enabled: bool = True
     huggingface_token: str | None = None
     audio_source: str = "all"  # "all" | "apps"

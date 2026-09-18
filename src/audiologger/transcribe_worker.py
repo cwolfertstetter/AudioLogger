@@ -19,7 +19,7 @@ import sys
 import time
 import traceback
 import wave
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -94,12 +94,21 @@ def _wav_duration_seconds(path: Path) -> float:
         return w.getnframes() / w.getframerate()
 
 
+@dataclass(frozen=True)
+class TranscriptionResult:
+    """Segments plus the language they were transcribed in."""
+    segments: list[Segment]
+    language: str | None
+
+
 class WhisperXPipeline:
     """Lazily loads WhisperX + pyannote diarization once per process."""
 
     def __init__(self, model_size: str, device: str, compute_type: str,
-                 diarization_enabled: bool, hf_token: str | None):
+                 diarization_enabled: bool, hf_token: str | None,
+                 language: str = "de"):
         self.model_size = model_size
+        self.language = language
         self.device = device
         self.compute_type = compute_type
         self.diarization_enabled = diarization_enabled
@@ -140,9 +149,10 @@ class WhisperXPipeline:
         diarize: bool,
         model_size: str | None = None,
         align: bool = True,
-    ) -> list[Segment]:
+        language: str | None = None,
+    ) -> TranscriptionResult:
         if not audio_path.exists():
-            return []
+            return TranscriptionResult([], None)
         effective_model = model_size if model_size is not None else self.model_size
         whisper_model = self._get_model(effective_model)
 
@@ -160,9 +170,12 @@ class WhisperXPipeline:
                 audio_path.name,
                 getattr(audio, "size", 0),
             )
-            return []
+            return TranscriptionResult([], None)
 
-        result = whisper_model.transcribe(audio, batch_size=16)
+        kwargs: dict = {"batch_size": 16}
+        if language:
+            kwargs["language"] = language
+        result = whisper_model.transcribe(audio, **kwargs)
 
         if align:
             # Align word-level (improves timestamp accuracy; multilingual handled by whisperx)
@@ -183,7 +196,9 @@ class WhisperXPipeline:
                 diarize_segments = self._diarize(audio)
                 result = whisperx.assign_word_speakers(diarize_segments, result)
 
-        return self._to_segments(result, diarize)
+        return TranscriptionResult(
+            self._to_segments(result, diarize), result.get("language") or language
+        )
 
     def _to_segments(self, result: dict, diarize: bool) -> list[Segment]:
         segments: list[Segment] = []
@@ -272,7 +287,8 @@ def _process_dictation_session(session_dir: Path, pipeline: WhisperXPipeline, cf
         diarize=False,
         model_size=cfg.dictation_model,
         align=False,
-    )
+        language=cfg.language,
+    ).segments
 
     joined_text = " ".join(s.text for s in segments)
 
@@ -334,7 +350,8 @@ def _process_dictation_extend_session(
             diarize=False,
             model_size=cfg.dictation_model,
             align=False,
-        )
+            language=cfg.language,
+        ).segments
 
         # 2. Offset timestamps by existing audio duration
         existing_duration = _wav_duration_seconds(target_dir / "mic.wav")
@@ -416,12 +433,21 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
         capture_warnings = [line for line in raw.splitlines() if line.strip()]
         warnings.extend(capture_warnings)
 
-    mic_segments = pipeline.transcribe(mic_wav, diarize=False)
-    mic_segments = _force_speaker(mic_segments, "Me")
-
-    sys_segments = pipeline.transcribe(sys_wav, diarize=True)
+    # The system track carries continuous speech, so WhisperX detects its
+    # language reliably.  The mic track is mostly silence -- the user listens
+    # more than they talk -- and detection there is a coin flip: it reported
+    # 'en' at 0.19 confidence on a German meeting and then hallucinated canned
+    # English phrases onto the silent stretches.  So the mic inherits whatever
+    # the system track resolved to, falling back to the configured language.
+    sys_result = pipeline.transcribe(sys_wav, diarize=True)
+    sys_segments = sys_result.segments
     if not pipeline.diarization_enabled:
         warnings.append("Diarization disabled or unavailable — all speakers labelled 'Others'.")
+
+    mic_result = pipeline.transcribe(
+        mic_wav, diarize=False, language=sys_result.language or pipeline.language
+    )
+    mic_segments = _force_speaker(mic_result.segments, "Me")
 
     merged = merge_segments(mic_segments, sys_segments)
 
@@ -482,6 +508,7 @@ def main(argv: list[str]) -> int:
         compute_type=cfg.compute_type,
         diarization_enabled=cfg.diarization_enabled,
         hf_token=cfg.huggingface_token,
+        language=cfg.language,
     )
 
     pending_path = state_dir / "pending.txt"
