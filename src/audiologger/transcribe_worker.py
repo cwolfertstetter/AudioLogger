@@ -20,6 +20,7 @@ import sys
 import time
 import traceback
 import wave
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -161,14 +162,30 @@ def normalize_for_transcription(
     return np.clip(a * (10.0 ** (gain_db / 20.0)), -1.0, 1.0).astype(np.float32)
 
 
+def _span(seg) -> tuple[float, float]:
+    """Start/end of either a raw whisper dict or a Segment."""
+    if isinstance(seg, Mapping):
+        return float(seg.get("start", 0.0)), float(seg.get("end", 0.0))
+    return float(seg.start), float(seg.end)
+
+
+def _text_of(seg) -> str:
+    return str(seg.get("text", "") if isinstance(seg, Mapping) else seg.text)
+
+
 def drop_silent_segments(
-    segments: list[Segment],
+    segments: list,
     audio: "np.ndarray",
     sample_rate: int = 16000,
     *,
     threshold_db: float = -25.0,
-) -> list[Segment]:
+) -> list:
     """Throw away segments that sit on silence.
+
+    Runs on the raw segments whisper returns, before alignment.  Alignment can
+    move a segment's window seconds away from the speech it transcribes -- on
+    three real recordings that cost 16 of 17 drops, including whole sentences.
+    The raw VAD spans do cover their speech, so the gate reads those.
 
     Whisper does not stay quiet when there is nothing to transcribe -- it drops
     boilerplate from its training data onto silent stretches ("Vielen Dank.",
@@ -197,18 +214,20 @@ def drop_silent_segments(
         return list(segments)
 
     floor = level * (10.0 ** (threshold_db / 20.0))
-    kept: list[Segment] = []
+    kept: list = []
     for seg in segments:
-        start = max(0, int(seg.start * sample_rate))
-        end = min(len(a), int(seg.end * sample_rate))
+        seg_start, seg_end = _span(seg)
+        start = max(0, int(seg_start * sample_rate))
+        end = min(len(a), int(seg_end * sample_rate))
         if end <= start:
-            log.info("Dropping segment at %.1fs (past end of audio): %r", seg.start, seg.text[:40])
+            log.info("Dropping segment at %.1fs (past end of audio): %r",
+                     seg_start, _text_of(seg)[:40])
             continue
         window = a[start:end].astype(np.float64)
         if float(np.sqrt(np.mean(window ** 2))) >= floor:
             kept.append(seg)
         else:
-            log.info("Dropping segment at %.1fs on silence: %r", seg.start, seg.text[:40])
+            log.info("Dropping segment at %.1fs on silence: %r", seg_start, _text_of(seg)[:40])
     return kept
 
 
@@ -236,6 +255,10 @@ _BOILERPLATE_EXACT = frozenset({
 _BOILERPLATE_PATTERNS = (
     # "Untertitelung des ZDF, 2020" / "Untertitel im Auftrag des ..." / "Untertitel von ..."
     re.compile(r"^untertitel(ung)?\s+(des|der|von|im auftrag|by)\b"),
+    # "Untertitelung. BR 2018" -- station after a full stop.  What every one of
+    # these credits carries is a broadcast year, and talking about subtitles in
+    # a meeting does not, so the year is what makes this safe to match.
+    re.compile(r"^untertitel(ung)?\b.*\b(19|20)\d{2}\b"),
     # "Untertitel 2.97" -- a bare version number
     re.compile(r"^untertitel\s+[\d.,]+$"),
     re.compile(r"^teksting av\b"),
@@ -367,6 +390,19 @@ class WhisperXPipeline:
             kwargs["language"] = language
         result = whisper_model.transcribe(audio, **kwargs)
 
+        # Hold on to this now: whisperx.align below returns a fresh dict with
+        # only "segments" and "word_segments", so the detected language would
+        # otherwise be gone by the time the result is built -- and the meeting
+        # path would silently fall back to the configured language instead of
+        # inheriting the system track's.
+        detected_language = result.get("language") or language
+
+        # Gate on level here, while the timestamps still come from the VAD and
+        # cover the speech they belong to.  Alignment below can move a window
+        # seconds away from its words, and a gate reading the moved window
+        # deletes real sentences.  Gating first also leaves less to align.
+        result["segments"] = drop_silent_segments(result.get("segments", []), audio)
+
         if align:
             # Align word-level (improves timestamp accuracy; multilingual handled by whisperx)
             try:
@@ -386,13 +422,10 @@ class WhisperXPipeline:
                 diarize_segments = self._diarize(audio)
                 result = whisperx.assign_word_speakers(diarize_segments, result)
 
-        # Two passes at Whisper's invented text: by level, for what it drops
-        # onto silence, and by wording, for the stock subtitle phrases it drops
-        # onto real audio where no level test can reach.  `audio` is the
-        # normalized array, but the gain is uniform so the levels still compare.
-        segments = drop_silent_segments(self._to_segments(result, diarize), audio)
-        segments = drop_boilerplate_segments(segments)
-        return TranscriptionResult(segments, result.get("language") or language)
+        # Second pass at Whisper's invented text: by wording, for the stock
+        # subtitle phrases it drops onto real audio, where no level test reaches.
+        segments = drop_boilerplate_segments(self._to_segments(result, diarize))
+        return TranscriptionResult(segments, detected_language)
 
     def _to_segments(self, result: dict, diarize: bool) -> list[Segment]:
         segments: list[Segment] = []

@@ -145,3 +145,59 @@ def test_drops_an_invented_segment_30_db_below_the_speech_level():
     kept = drop_silent_segments([seg(2.0, 4.0, "Vielen Dank.")], audio, SR)
 
     assert kept == []
+
+
+# --- the gate must run on raw timestamps, before alignment -------------------
+# WhisperX alignment can move a segment's window seconds away from the speech it
+# belongs to. On three real recordings that cost 16 of 17 drops: "Ich verstehe
+# es nicht mehr." measured -7.0 dB over its raw span and -51.5 dB over the
+# aligned one, 5.3 s away from the words it transcribes.
+
+def test_gate_accepts_raw_whisper_segments():
+    """Raw segments are dicts, not Segment objects."""
+    audio = np.concatenate([tone(2.0, -20.0), silence(8.0)])
+    raw = [
+        {"start": 0.0, "end": 2.0, "text": "echt"},
+        {"start": 5.0, "end": 6.0, "text": "Vielen Dank."},
+    ]
+
+    kept = drop_silent_segments(raw, audio, SR)
+
+    assert [s["text"] for s in kept] == ["echt"]
+
+
+def test_a_segment_the_alignment_moves_onto_silence_survives(tmp_path, monkeypatch):
+    import whisperx
+    from audiologger.transcribe_worker import WhisperXPipeline
+
+    # speech lives at 8-10 s; everything before it is silent
+    audio = np.concatenate([silence(8.0), tone(2.0, -20.0)])
+    monkeypatch.setattr(whisperx, "load_audio", lambda p: audio)
+
+    class Model:
+        def transcribe(self, a, **kw):
+            # raw timestamps land on the speech, as the VAD found it
+            return {"language": "de", "segments": [{"start": 8.0, "end": 10.0, "text": "Ich verstehe es nicht mehr."}]}
+
+    seen = {}
+
+    def fake_align(segments, model_a, metadata, a, device, **kw):
+        seen["segments"] = list(segments)
+        # alignment misplaces it onto the silent stretch
+        return {"segments": [{"start": 2.0, "end": 2.3, "text": s["text"]} for s in segments]}
+
+    monkeypatch.setattr(whisperx, "load_align_model", lambda **kw: (object(), {}))
+    monkeypatch.setattr(whisperx, "align", fake_align)
+
+    pipe = WhisperXPipeline(
+        model_size="large-v3", device="cpu", compute_type="int8",
+        diarization_enabled=False, hf_token=None, language="de",
+    )
+    pipe._models["large-v3"] = Model()
+    f = tmp_path / "mic.wav"
+    f.touch()
+
+    result = pipe.transcribe(f, diarize=False, align=True, language="de")
+
+    assert len(seen["segments"]) == 1, "gate must run before alignment"
+    assert [s.text for s in result.segments] == ["Ich verstehe es nicht mehr."]

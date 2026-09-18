@@ -140,3 +140,28 @@ def test_meeting_falls_back_to_the_configured_language_when_detection_yields_not
 
 def test_config_language_defaults_to_german():
     assert Config().language == "de"
+
+
+# --- the detected language must survive alignment -----------------------------
+# whisperx.align returns {"segments", "word_segments"} and REPLACES the result
+# dict, so the "language" key whisper put there is gone by the time the result
+# is built. Without this, the meeting path always fell back to the configured
+# language and "inherit from the system track" never actually did anything.
+
+def test_reports_the_detected_language_even_though_alignment_replaces_the_result(
+    tmp_path, monkeypatch, pipeline
+):
+    import whisperx
+
+    pipeline._models["large-v3"] = FakeModel(detected="en")
+    monkeypatch.setattr(whisperx, "load_align_model", lambda **kw: (object(), {}))
+    monkeypatch.setattr(
+        whisperx, "align",
+        lambda segments, *a, **kw: {"segments": list(segments), "word_segments": []},
+    )
+    audio = tmp_path / "system.wav"
+    audio.touch()
+
+    result = pipeline.transcribe(audio, diarize=False, align=True)
+
+    assert result.language == "en"

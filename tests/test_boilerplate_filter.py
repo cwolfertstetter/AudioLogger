@@ -119,3 +119,26 @@ def test_transcribe_drops_boilerplate_even_when_it_sits_on_loud_audio(tmp_path, 
     result = pipe.transcribe(f, diarize=False, align=False, language="de")
 
     assert [s.text for s in result.segments] == ["Der hat aber hier gestimmt."]
+
+
+# --- broadcaster credits come in more shapes than first assumed ---------------
+# "Untertitelung. BR 2018" turned up after the first pattern list shipped: the
+# station name follows a full stop, not "des"/"der"/"von". What they all share
+# is a broadcast year.
+
+@pytest.mark.parametrize("text", [
+    "Untertitelung. BR 2018",
+    "Untertitelung des ZDF, 2020",
+    "Untertitel im Auftrag des ZDF, 2017",
+    "Untertitelung. SWR 2021",
+])
+def test_drops_broadcaster_credits_with_a_year(text):
+    assert drop_boilerplate_segments([seg(text)]) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Wir brauchen Untertitel für das Video.",
+    "Untertitel wären hier wirklich hilfreich.",
+])
+def test_keeps_real_talk_about_subtitles(text):
+    assert texts(drop_boilerplate_segments([seg(text)])) == [text]
