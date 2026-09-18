@@ -6,9 +6,14 @@ WAVE_FORMAT_IEEE_FLOAT header instead -- many USB headsets do -- raise
 AssertionError inside soundcard, which killed the mic thread before a single
 sample was written and left a 44-byte (header-only) mic.wav behind.
 
-PortAudio negotiates both formats, and also does the stereo->mono downmix and
-float->int16 conversion for us, so mic capture goes through pyaudiowpatch --
+PortAudio negotiates both formats, so mic capture goes through pyaudiowpatch --
 the same library process_loopback.py already uses.
+
+It will not do the stereo->mono downmix, though: asking it for channels=1 on a
+2-channel WASAPI device hands back the interleaved stereo frames as a mono
+buffer, stretching one second of audio into two and dropping everything an
+octave.  So the stream is opened at the device's own channel count and mixed
+down here.
 """
 import logging
 import threading
@@ -16,6 +21,8 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+import numpy as np
 
 
 log = logging.getLogger(__name__)
@@ -39,6 +46,18 @@ try:
     _HAS_PYAUDIOWPATCH = True
 except Exception:  # pragma: no cover
     _HAS_PYAUDIOWPATCH = False
+
+
+def _to_mono(data: bytes, channels: int) -> bytes:
+    """Average interleaved int16 channels down to one."""
+    if channels <= 1:
+        return data
+    samples = np.frombuffer(data, dtype=np.int16)
+    usable = len(samples) - (len(samples) % channels)
+    if usable <= 0:
+        return b""
+    frames = samples[:usable].reshape(-1, channels)
+    return frames.mean(axis=1).round().astype(np.int16).tobytes()
 
 
 def _default_input_device(pa: Any, pyaudio_mod: Any) -> dict:
@@ -90,9 +109,16 @@ def record_microphone(
     pa = pa_factory()
     try:
         device = _default_input_device(pa, pyaudio_mod)
+        # Open at the device's own channel count and mix down ourselves.  Asking
+        # PortAudio for mono on a 2-channel WASAPI device hands back the
+        # interleaved stereo frames as if they were a mono buffer, so one second
+        # of audio is written as two and everything plays an octave too low.
+        # Measured through one device with a 777 Hz tone: channels=1 recorded it
+        # at 377.9 Hz, channels=2 at 776.4 Hz.
+        channels = max(1, int(device.get("maxInputChannels", 1) or 1))
         stream = pa.open(
             format=pyaudio_mod.paInt16,
-            channels=1,
+            channels=channels,
             rate=sample_rate,
             frames_per_buffer=sample_rate * CHUNK_SECONDS,
             input=True,
@@ -119,8 +145,9 @@ def record_microphone(
                 except Exception:
                     log.exception("Microphone read failed")
                     break
-                wav.writeframes(data)
-                frames += len(data) // 2
+                mono = _to_mono(data, channels)
+                wav.writeframes(mono)
+                frames += len(mono) // 2
     finally:
         try:
             stream.stop_stream()
