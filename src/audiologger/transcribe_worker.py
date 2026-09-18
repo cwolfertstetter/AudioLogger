@@ -14,16 +14,17 @@ poll loop, so the first job does not pay model-load latency.
 import argparse
 import json
 import logging
+import re
 import shutil
 import sys
 import time
 import traceback
 import wave
 from dataclasses import asdict, dataclass
-
-import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import numpy as np
 
 from audiologger.audio_mix import append_wav
 from audiologger.config import Config, load_config
@@ -96,7 +97,6 @@ def _wav_duration_seconds(path: Path) -> float:
         return w.getnframes() / w.getframerate()
 
 
-
 def _speech_level(audio: "np.ndarray", sample_rate: int) -> float:
     """RMS of the frames carrying signal, ignoring the silence between them.
 
@@ -161,7 +161,6 @@ def normalize_for_transcription(
     return np.clip(a * (10.0 ** (gain_db / 20.0)), -1.0, 1.0).astype(np.float32)
 
 
-
 def drop_silent_segments(
     segments: list[Segment],
     audio: "np.ndarray",
@@ -210,6 +209,72 @@ def drop_silent_segments(
             kept.append(seg)
         else:
             log.info("Dropping segment at %.1fs on silence: %r", seg.start, seg.text[:40])
+    return kept
+
+
+# Stock phrases from the subtitle files Whisper was trained on.  It falls back
+# on them when it has nothing to transcribe but the audio is not quiet enough
+# for the level gate to catch -- breathing, room noise, the tail of a word.
+# Matched against the whole segment only, so "Vielen Dank für die Erklärung"
+# stays.  The German entries are the ones that actually turn up here; the others
+# were seen before the language was pinned and cost nothing to keep out.
+_BOILERPLATE_EXACT = frozenset({
+    "vielen dank",
+    "vielen dank fürs zuschauen",
+    "vielen dank für die aufmerksamkeit",
+    "danke fürs zuschauen",
+    "danke für's zuschauen",
+    "untertitel im auftrag des zdf",
+    "продолжение следует",
+    "спасибо за просмотр",
+    "takk for at du så med",
+    "thanks for watching",
+    "thank you for watching",
+    "subscribe to my channel",
+})
+
+_BOILERPLATE_PATTERNS = (
+    # "Untertitelung des ZDF, 2020" / "Untertitel im Auftrag des ..." / "Untertitel von ..."
+    re.compile(r"^untertitel(ung)?\s+(des|der|von|im auftrag|by)\b"),
+    # "Untertitel 2.97" -- a bare version number
+    re.compile(r"^untertitel\s+[\d.,]+$"),
+    re.compile(r"^teksting av\b"),
+    re.compile(r"^subtitles?\s+(by|von)\b"),
+    re.compile(r"\bamara\.org\b"),
+)
+
+
+def _normalize_for_matching(text: str) -> str:
+    """Lowercase, collapse whitespace, strip surrounding punctuation."""
+    collapsed = re.sub(r"\s+", " ", text.strip().lower())
+    return collapsed.strip(" .!?-–—…\"'")
+
+
+def drop_boilerplate_segments(segments: list[Segment]) -> list[Segment]:
+    """Throw away segments that are nothing but Whisper's subtitle boilerplate.
+
+    The level gate in drop_silent_segments() catches text invented onto
+    silence.  This catches text invented onto real audio, where no level test
+    can help: on one 71-minute recording the invented segments sat at -23.3 to
+    -2.4 dB below the speech level and genuine content at -20.4 to +1.9 dB --
+    overlapping ranges.  What separates them is the wording.
+
+    Only whole-segment matches are dropped.  The trade is deliberate: a
+    genuine, standalone "Vielen Dank." is lost too, which is worth it against
+    the fifteen invented ones in that same recording.
+    """
+    kept: list[Segment] = []
+    for seg in segments:
+        normalized = _normalize_for_matching(seg.text)
+        if not normalized:  # nothing but punctuation or ellipses
+            log.info("Dropping empty segment at %.1fs: %r", seg.start, seg.text[:40])
+            continue
+        if normalized in _BOILERPLATE_EXACT or any(
+            p.search(normalized) for p in _BOILERPLATE_PATTERNS
+        ):
+            log.info("Dropping boilerplate at %.1fs: %r", seg.start, seg.text[:40])
+            continue
+        kept.append(seg)
     return kept
 
 
@@ -321,10 +386,12 @@ class WhisperXPipeline:
                 diarize_segments = self._diarize(audio)
                 result = whisperx.assign_word_speakers(diarize_segments, result)
 
-        # Whisper drops training-data boilerplate onto silence; compare each
-        # segment against the audio underneath it.  `audio` is the normalized
-        # array, but the gain is uniform so the comparison is unaffected.
+        # Two passes at Whisper's invented text: by level, for what it drops
+        # onto silence, and by wording, for the stock subtitle phrases it drops
+        # onto real audio where no level test can reach.  `audio` is the
+        # normalized array, but the gain is uniform so the levels still compare.
         segments = drop_silent_segments(self._to_segments(result, diarize), audio)
+        segments = drop_boilerplate_segments(segments)
         return TranscriptionResult(segments, result.get("language") or language)
 
     def _to_segments(self, result: dict, diarize: bool) -> list[Segment]:
