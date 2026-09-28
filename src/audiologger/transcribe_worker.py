@@ -37,6 +37,9 @@ from audiologger.transcript_merger import merge_segments, render_markdown
 log = logging.getLogger("transcribe_worker")
 DEFAULT_WARM_IDLE_SECONDS = 600
 POLL_INTERVAL_SECONDS = 1.0
+# How much transcribed speech the system track needs before the mic track
+# inherits its language; below this, the configured language is used.
+MIN_SPEECH_TO_LEND_LANGUAGE_S = 20.0
 
 
 def _setup_logging(state_dir: Path) -> None:
@@ -671,11 +674,14 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
     if not pipeline.diarization_enabled:
         warnings.append("Diarization disabled or unavailable — all speakers labelled 'Others'.")
 
-    # Only a track that actually produced speech has a language worth borrowing.
-    # Recording alone leaves system.wav digitally silent, and whisper still names
-    # a language for it -- "en" at 0.31 confidence -- which then got forced onto
-    # the mic and turned German speech into English prose.
-    inherited = sys_result.language if sys_result.segments else None
+    # Only a track that actually carried a conversation has a language worth
+    # borrowing.  A silent system.wav -- recording alone, or a call playing on a
+    # different device than the one being looped back -- still gets a language
+    # named by whisper, and a single hallucinated "Thank you." on a stray sound
+    # was enough to force English onto 20 minutes of German.  So require a
+    # minimum of transcribed speech, not merely a segment.
+    sys_speech = sum(max(0.0, s.end - s.start) for s in sys_result.segments)
+    inherited = sys_result.language if sys_speech >= MIN_SPEECH_TO_LEND_LANGUAGE_S else None
     mic_result = pipeline.transcribe(
         mic_wav, diarize=False, language=inherited or pipeline.language
     )

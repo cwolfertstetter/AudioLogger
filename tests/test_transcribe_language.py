@@ -197,3 +197,60 @@ def test_a_system_track_without_speech_does_not_dictate_the_mic_language(session
     assert pipe.calls[1] == ("mic.wav", "de"), (
         "mic must fall back to the configured language, not the guess made on silence"
     )
+
+
+# --- a single stray segment is not enough speech to lend a language ------------
+# Recording 2026-09-28_10-32-26: the call played on a headset while the loopback
+# recorded the (silent) default speakers. Whisper hallucinated one "Thank you."
+# onto a brief sound and named the track English. One segment passed the old
+# guard, so 20 minutes of German were translated into English prose.
+
+class NearlySilentSystemPipeline(FakePipeline):
+    """System track: one short hallucinated English segment, nothing else."""
+
+    def transcribe(self, audio_path, *, diarize, model_size=None, align=True, language=None):
+        from audiologger.transcribe_worker import TranscriptionResult
+
+        self.calls.append((Path(audio_path).name, language))
+        if Path(audio_path).name == "system.wav":
+            return TranscriptionResult(
+                segments=[Segment(start=424.1, end=425.0, text="Thank you.", speaker="Speaker 1")],
+                language="en",
+            )
+        return TranscriptionResult(
+            segments=[Segment(start=0.0, end=1.0, text="hallo", speaker="Others")],
+            language=language or self._detected,
+        )
+
+
+def test_one_stray_segment_does_not_dictate_the_mic_language(session):
+    pipe = NearlySilentSystemPipeline(detected="de", language="de")
+
+    _process_meeting_session(session, pipe)
+
+    assert pipe.calls[1] == ("mic.wav", "de")
+
+
+class TalkativeSystemPipeline(FakePipeline):
+    """System track with a real conversation in English."""
+
+    def transcribe(self, audio_path, *, diarize, model_size=None, align=True, language=None):
+        from audiologger.transcribe_worker import TranscriptionResult
+
+        self.calls.append((Path(audio_path).name, language))
+        if Path(audio_path).name == "system.wav":
+            segs = [Segment(start=i * 4.0, end=i * 4.0 + 3.5, text=f"sentence {i}", speaker="Speaker 1")
+                    for i in range(20)]
+            return TranscriptionResult(segments=segs, language="en")
+        return TranscriptionResult(
+            segments=[Segment(start=0.0, end=1.0, text="hello", speaker="Others")],
+            language=language or self._detected,
+        )
+
+
+def test_a_real_english_conversation_still_lends_its_language(session):
+    pipe = TalkativeSystemPipeline(detected="de", language="de")
+
+    _process_meeting_session(session, pipe)
+
+    assert pipe.calls[1] == ("mic.wav", "en")
