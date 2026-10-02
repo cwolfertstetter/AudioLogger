@@ -254,3 +254,58 @@ def test_controller_is_wired_to_the_screenshot_toast(tmp_path, monkeypatch):
     watcher = app.controller._screenshot_watcher_factory(tmp_path)
     assert isinstance(watcher, ClipboardScreenshotWatcher)
     assert watcher._on_saved == app._notify_screenshot_saved
+
+
+# --- the Notifications switch ----------------------------------------------------------
+# RecordingNotifier records every call whether or not toasts are enabled, so it
+# cannot show whether a toast would have appeared. These tests use the real
+# Notifier, which owns the `enabled` check, and replace only winotify's toast.
+
+@pytest.fixture
+def shown_toasts(monkeypatch):
+    """What winotify would have put on screen, as [{"title", "msg"}, ...]."""
+    shown: list[dict] = []
+
+    class FakeToast:
+        def __init__(self, *, title, msg, **_ignored):
+            self._toast = {"title": title, "msg": msg}
+
+        def add_actions(self, **_ignored):
+            pass
+
+        def show(self):
+            shown.append(self._toast)
+
+    monkeypatch.setattr("audiologger.notifications.Notification", FakeToast)
+    return shown
+
+
+@pytest.fixture
+def notifying_app(tmp_path, monkeypatch, shown_toasts):
+    import audiologger.tray_app as ta
+    from audiologger.notifications import Notifier
+
+    monkeypatch.setattr(ta, "config_path", lambda: tmp_path / "config.yaml")
+    monkeypatch.setattr(ta, "save_config", lambda _p, _cfg: None)
+    a = TrayApp.__new__(TrayApp)
+    a.cfg = Config(output_dir=tmp_path / "recs")
+    a.notifier = Notifier(enabled=a.cfg.notification_enabled)
+    return a
+
+
+def test_switching_notifications_off_silences_toasts_at_once(notifying_app, shown_toasts):
+    """Muting mid-meeting must stop 'Screenshot N saved' without a restart."""
+    notifying_app._set_bool_setting("notification_enabled", "Notifications", False)
+    notifying_app._notify_screenshot_saved(1, 12.0, Path("screenshots/screenshot_00-00-12.png"))
+
+    assert shown_toasts == []
+
+
+def test_switching_notifications_on_confirms_and_resumes_toasts(notifying_app, shown_toasts):
+    notifying_app.cfg.notification_enabled = False
+    notifying_app.notifier.enabled = False
+
+    notifying_app._set_bool_setting("notification_enabled", "Notifications", True)
+    notifying_app._notify_screenshot_saved(1, 12.0, Path("screenshots/screenshot_00-00-12.png"))
+
+    assert [t["title"] for t in shown_toasts] == ["Setting changed", "Screenshot 1 saved"]

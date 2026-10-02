@@ -181,6 +181,10 @@ class TrayApp:
         """Mutate a boolean cfg field, save, and fire a toast."""
         setattr(self.cfg, field, value)
         save_config(config_path(), self.cfg)
+        if field == "notification_enabled":
+            # The Notifier took the flag at start-up; keep it in step, so that
+            # muting takes effect now and the toast below follows the new value.
+            self.notifier.enabled = value
         state = "Enabled" if value else "Disabled"
         self.notifier.notify(
             "Setting changed",
