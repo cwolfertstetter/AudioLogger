@@ -418,9 +418,22 @@ class TrayApp:
         if not out.exists():
             self.notifier.notify("No recordings", f"{out} does not exist.")
             return
-        sessions = sorted([d for d in out.iterdir() if d.is_dir()], key=lambda p: p.name)
-        if not sessions:
+        # While a recording runs, the newest folder is the half-written session
+        # itself -- never hand that to the worker.
+        active = getattr(self.controller, "current_session", None)
+        active = active.resolve() if active is not None else None
+        all_sessions = [d for d in out.iterdir() if d.is_dir()]
+        if not all_sessions:
             self.notifier.notify("No recordings", "Output folder is empty.")
+            return
+        sessions = sorted(
+            [d for d in all_sessions if d.resolve() != active], key=lambda p: p.name
+        )
+        if not sessions:
+            self.notifier.notify(
+                "Nothing to re-transcribe",
+                "The only recording is the one still in progress.",
+            )
             return
         last = sessions[-1]
         self.queue.enqueue(last)

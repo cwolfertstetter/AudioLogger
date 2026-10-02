@@ -57,6 +57,11 @@ class RecordingController:
         self._current_mode: str | None = None
 
     @property
+    def current_session(self) -> Path | None:
+        """Folder of the recording in progress, or None while idle."""
+        return self._current_session
+
+    @property
     def state(self) -> RecordingState:
         return self._state
 

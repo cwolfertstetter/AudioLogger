@@ -321,3 +321,14 @@ def test_failing_notify_fn_does_not_break_the_stop_path(cfg):
     assert controller.state is RecordingState.IDLE
     assert not (session / MARKER_FILENAME).exists()
     enqueue.assert_called_once_with(session)
+
+
+def test_current_session_is_none_while_idle(controller):
+    assert controller.current_session is None
+
+
+def test_current_session_names_the_folder_being_recorded(controller, cfg):
+    controller.toggle()  # start
+    assert controller.current_session == cfg.output_dir / "2026-05-18_14-32-15"
+    controller.toggle()  # stop
+    assert controller.current_session is None

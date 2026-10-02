@@ -134,3 +134,67 @@ def test_dead_mic_recording_produces_a_visible_toast(tmp_path, monkeypatch):
     call = app.notifier.calls[0]
     assert "Microphone recording aborted." in call["message"]
     assert call["launch"].startswith("file:///")
+
+
+# --- "Re-transcribe Last Recording" ------------------------------------------
+# The menu item used to enqueue whatever folder sorted last. While a recording
+# runs, that is the half-written session itself.
+
+class FakeQueue:
+    def __init__(self):
+        self.enqueued: list[Path] = []
+
+    def enqueue(self, session: Path) -> None:
+        self.enqueued.append(session)
+
+
+class FakeController:
+    def __init__(self, current_session=None):
+        self.current_session = current_session
+
+
+@pytest.fixture
+def retry_app(tmp_path):
+    a = TrayApp.__new__(TrayApp)
+    a.cfg = Config(output_dir=tmp_path / "recs")
+    a.notifier = RecordingNotifier()
+    a.queue = FakeQueue()
+    a.controller = FakeController()
+    return a
+
+
+def _session(root: Path, name: str) -> Path:
+    d = root / name
+    d.mkdir(parents=True)
+    return d
+
+
+def test_retranscribe_enqueues_the_newest_session(retry_app, tmp_path):
+    root = tmp_path / "recs"
+    _session(root, "2026-10-01_09-00-00")
+    newest = _session(root, "2026-10-01_10-00-00")
+
+    retry_app._retry_last()
+
+    assert retry_app.queue.enqueued == [newest]
+
+
+def test_retranscribe_skips_the_session_still_being_recorded(retry_app, tmp_path):
+    root = tmp_path / "recs"
+    finished = _session(root, "2026-10-01_09-00-00")
+    active = _session(root, "2026-10-01_10-00-00")
+    retry_app.controller = FakeController(current_session=active)
+
+    retry_app._retry_last()
+
+    assert retry_app.queue.enqueued == [finished]
+
+
+def test_retranscribe_with_only_the_active_recording_does_nothing(retry_app, tmp_path):
+    active = _session(tmp_path / "recs", "2026-10-01_10-00-00")
+    retry_app.controller = FakeController(current_session=active)
+
+    retry_app._retry_last()
+
+    assert retry_app.queue.enqueued == []
+    assert retry_app.notifier.calls, "the user should hear why nothing happened"

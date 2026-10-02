@@ -21,7 +21,7 @@ import time
 import traceback
 import wave
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -40,6 +40,10 @@ POLL_INTERVAL_SECONDS = 1.0
 # How much transcribed speech the system track needs before the mic track
 # inherits its language; below this, the configured language is used.
 MIN_SPEECH_TO_LEND_LANGUAGE_S = 20.0
+# Left next to mic.wav by the repair of recordings made through the channels=1
+# capture bug (fixed in e7b186a). Averaging each interleaved pair restored the
+# pitch but halved the file, so its timestamps run at half the conversation's.
+REPAIRED_MIC_MARKER = "mic_broken_original.wav"
 
 
 def _setup_logging(state_dir: Path) -> None:
@@ -686,6 +690,8 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
         mic_wav, diarize=False, language=inherited or pipeline.language
     )
     mic_segments = _force_speaker(mic_result.segments, "Me")
+    if (session_dir / REPAIRED_MIC_MARKER).exists():
+        mic_segments = [replace(s, start=s.start * 2.0, end=s.end * 2.0) for s in mic_segments]
 
     merged = merge_segments(mic_segments, sys_segments)
 

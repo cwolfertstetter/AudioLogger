@@ -254,3 +254,40 @@ def test_a_real_english_conversation_still_lends_its_language(session):
     _process_meeting_session(session, pipe)
 
     assert pipe.calls[1] == ("mic.wav", "en")
+
+
+# --- recordings repaired after the channels=1 capture bug --------------------
+# The repair averaged each interleaved pair, so mic.wav runs at half the
+# conversation's length and mic_broken_original.wav marks it. Re-transcribing
+# through the normal path must stretch the mic timestamps back, or "Me" lines
+# land in the first half of the conversation.
+
+class LateMicPipeline(FakePipeline):
+    def transcribe(self, audio_path, *, diarize, model_size=None, align=True, language=None):
+        from audiologger.transcribe_worker import TranscriptionResult
+
+        self.calls.append((Path(audio_path).name, language))
+        return TranscriptionResult(
+            segments=[Segment(start=5.0, end=6.0, text="hallo", speaker="Others")],
+            language=language or self._detected,
+        )
+
+
+def test_a_repaired_mic_track_is_stretched_back_onto_the_conversation_timeline(session):
+    import json
+
+    (session / "mic_broken_original.wav").write_bytes(b"")
+
+    _process_meeting_session(session, LateMicPipeline())
+
+    mic = json.loads((session / "transcript.json").read_text(encoding="utf-8"))["mic_segments"]
+    assert (mic[0]["start"], mic[0]["end"]) == (10.0, 12.0)
+
+
+def test_an_ordinary_mic_track_keeps_its_timestamps(session):
+    import json
+
+    _process_meeting_session(session, LateMicPipeline())
+
+    mic = json.loads((session / "transcript.json").read_text(encoding="utf-8"))["mic_segments"]
+    assert (mic[0]["start"], mic[0]["end"]) == (5.0, 6.0)
