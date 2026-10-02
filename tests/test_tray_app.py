@@ -309,3 +309,5 @@ def test_switching_notifications_on_confirms_and_resumes_toasts(notifying_app, s
     notifying_app._notify_screenshot_saved(1, 12.0, Path("screenshots/screenshot_00-00-12.png"))
 
     assert [t["title"] for t in shown_toasts] == ["Setting changed", "Screenshot 1 saved"]
+    # The switch applies at once, so the confirmation must not tell anyone to restart.
+    assert "Restart" not in shown_toasts[0]["msg"]

@@ -186,10 +186,8 @@ class TrayApp:
             # muting takes effect now and the toast below follows the new value.
             self.notifier.enabled = value
         state = "Enabled" if value else "Disabled"
-        self.notifier.notify(
-            "Setting changed",
-            f"{label} set to {state}. Restart may be required.",
-        )
+        hint = "" if field == "notification_enabled" else " Restart may be required."
+        self.notifier.notify("Setting changed", f"{label} set to {state}.{hint}")
 
     def _set_device(self, value: str) -> None:
         self.cfg.device = value
