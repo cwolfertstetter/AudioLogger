@@ -1,6 +1,7 @@
 """Merge mic + system segments into a Markdown transcript."""
-from typing import Iterable
+from typing import Iterable, Sequence
 
+from audiologger.screenshot_watch import Screenshot
 from audiologger.segment import Segment
 
 
@@ -28,14 +29,21 @@ def render_markdown(
     source_label: str,
     model_label: str,
     warnings: list[str],
+    screenshots: Sequence[Screenshot] = (),
 ) -> str:
-    """Render the final transcript Markdown matching the spec format."""
+    """Render the final transcript Markdown matching the spec format.
+
+    Screenshots are placed among the speech lines by time; a speech line that
+    starts in the same second comes first. Without screenshots the output is
+    unchanged.
+    """
     duration_str = format_timestamp(duration_seconds)
     # Drop the leading "00:" for short recordings — keep it consistent: spec
     # showed "47:21" for sub-hour. Strip leading "00:" only if hours == 0.
     if duration_str.startswith("00:"):
         duration_str = duration_str[3:]
 
+    shots = sorted(screenshots, key=lambda s: s.at_s)
     lines = [
         f"# Recording {recorded_at}",
         "",
@@ -43,10 +51,23 @@ def render_markdown(
         f"**Source:** {source_label}",
         f"**Model:** {model_label}",
     ]
+    if shots:
+        lines.append(f"**Screenshots:** {len(shots)}")
     for w in warnings:
         lines.append(f"**Warning:** {w}")
     lines.extend(["", "---", ""])
+    next_shot = 0
     for seg in segments:
+        while next_shot < len(shots) and shots[next_shot].at_s < seg.start:
+            lines.append(_screenshot_line(next_shot + 1, shots[next_shot]))
+            next_shot += 1
         ts = format_timestamp(seg.start)
         lines.append(f"**[{ts}] {seg.speaker}:** {seg.text}")
+    for i in range(next_shot, len(shots)):
+        lines.append(_screenshot_line(i + 1, shots[i]))
     return "\n".join(lines) + "\n"
+
+
+def _screenshot_line(number: int, shot: Screenshot) -> str:
+    return (f"**[{format_timestamp(shot.at_s)}] Screenshot {number}:** "
+            f"![Screenshot {number}]({shot.path})")

@@ -64,3 +64,79 @@ def test_render_markdown_includes_warnings():
         warnings=["System audio not available"],
     )
     assert "System audio not available" in md
+
+
+# --- screenshots ------------------------------------------------------------------
+
+from audiologger.screenshot_watch import Screenshot
+
+HEADER = dict(
+    recorded_at="2026-10-02 10:00:00",
+    duration_seconds=900,
+    source_label="mic + system (loopback)",
+    model_label="WhisperX large-v3",
+    warnings=[],
+)
+SPEECH = [
+    Segment(748.0, 752.0, "Hier seht ihr die neue Rezeptstruktur.", "Speaker 1"),
+    Segment(755.0, 757.0, "Okay, und wo kommt der Teig rein?", "Me"),
+]
+
+
+def body(md: str) -> list[str]:
+    return md.split("---\n\n", 1)[1].splitlines()
+
+
+def test_without_screenshots_the_transcript_is_exactly_as_before():
+    assert render_markdown(SPEECH, **HEADER) == (
+        "# Recording 2026-10-02 10:00:00\n"
+        "\n"
+        "**Duration:** 15:00\n"
+        "**Source:** mic + system (loopback)\n"
+        "**Model:** WhisperX large-v3\n"
+        "\n"
+        "---\n"
+        "\n"
+        "**[00:12:28] Speaker 1:** Hier seht ihr die neue Rezeptstruktur.\n"
+        "**[00:12:35] Me:** Okay, und wo kommt der Teig rein?\n"
+    )
+
+
+def test_a_screenshot_sits_between_the_speech_lines_around_it():
+    md = render_markdown(SPEECH, **HEADER,
+                         screenshots=[Screenshot(751, "screenshots/screenshot_00-12-31.png")])
+
+    assert body(md) == [
+        "**[00:12:28] Speaker 1:** Hier seht ihr die neue Rezeptstruktur.",
+        "**[00:12:31] Screenshot 1:** ![Screenshot 1](screenshots/screenshot_00-12-31.png)",
+        "**[00:12:35] Me:** Okay, und wo kommt der Teig rein?",
+    ]
+
+
+def test_speech_starting_in_the_same_second_comes_first():
+    md = render_markdown([Segment(751.0, 753.0, "Genau hier.", "Me")], **HEADER,
+                         screenshots=[Screenshot(751, "screenshots/screenshot_00-12-31.png")])
+
+    assert body(md)[0].startswith("**[00:12:31] Me:**")
+    assert body(md)[1].startswith("**[00:12:31] Screenshot 1:**")
+
+
+def test_screenshots_before_the_first_and_after_the_last_word_are_kept_in_order():
+    md = render_markdown(SPEECH, **HEADER, screenshots=[
+        Screenshot(800, "screenshots/screenshot_00-13-20.png"),
+        Screenshot(10, "screenshots/screenshot_00-00-10.png"),
+    ])
+
+    assert body(md)[0] == (
+        "**[00:00:10] Screenshot 1:** ![Screenshot 1](screenshots/screenshot_00-00-10.png)")
+    assert body(md)[-1] == (
+        "**[00:13:20] Screenshot 2:** ![Screenshot 2](screenshots/screenshot_00-13-20.png)")
+
+
+def test_the_header_counts_the_screenshots():
+    md = render_markdown(SPEECH, **HEADER, screenshots=[
+        Screenshot(10, "screenshots/screenshot_00-00-10.png"),
+        Screenshot(800, "screenshots/screenshot_00-13-20.png"),
+    ])
+
+    assert "**Model:** WhisperX large-v3\n**Screenshots:** 2\n" in md
