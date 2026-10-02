@@ -12,6 +12,55 @@
 
 ---
 
+## Deviations adopted in review
+
+The task texts below are the plan as first written. Review changed the following; where
+a task's text differs, the code and the spec are the source of truth.
+
+- **ctypes instead of `grabclipboard` (Task 2):** `WindowsClipboard` reads the clipboard
+  through the Win32 API (`IsClipboardFormatAvailable`, `OpenClipboard`, `GetClipboardData`)
+  and decodes with Pillow's PNG and DIB plugins. `ImageGrab.grabclipboard()` sleeps 500 ms
+  holding the GIL on a busy clipboard, which stalls the audio threads.
+- **Format order and the text skip (Task 2):** `choose_image_format` prefers PNG, then
+  CF_DIB, then CF_DIBV5 (GDI's DIBV5 alpha is zero, so it decodes as fully transparent).
+  A copy that also offers CF_UNICODETEXT (Excel cells, a Word selection) is skipped.
+- **Pending change and sequence re-check (Task 2):** a change counts as handled only after
+  a successful read and an unchanged sequence counter afterwards. If the counter moved
+  during the read, the change stays pending and its moment restarts at the next poll. An
+  image that cannot be decoded counts as a failed read, given up after 20 attempts;
+  failures are counted per change.
+- **Offset at first notice (Task 2):** the offset is taken when a change is first noticed,
+  not at save time, so a busy clipboard does not shift the screenshot's moment.
+- **`.part` + `os.replace` (Task 2):** each PNG is written as `<name>.png.part` and then
+  renamed; a crash mid-save leaves only a `.part`, which `find_screenshots` ignores. The
+  `screenshots/` folder is created on the first save attempt.
+- **Single-use guard (Task 2):** a second `start()` raises `RuntimeError`, and `stop()` no
+  longer clears the thread reference.
+- **Final poll on stop (Task 2):** after the thread has ended, `stop()` polls once more, so
+  a snip taken just before stopping is kept. It skips this when the thread is still inside
+  a poll after the 2 s join, or was never started.
+- **Worker guard (Task 4):** `_process_meeting_session` wraps `find_screenshots` in
+  try/except; a failing lookup is logged and the transcript is written without screenshots.
+- **Whole-second tie rule (Task 3):** `render_markdown` compares `at_s` with
+  `int(seg.start)`, so speech starting anywhere within the screenshot's second comes first.
+  Task 3's code carries this; its test block lacks the mid-second case
+  (`test_speech_in_the_same_displayed_second_comes_first_even_mid_second`).
+- **`_no_real_clipboard` fixture (Task 6):** an autouse fixture in `tests/test_tray_app.py`
+  swaps `WindowsClipboard` for an always-empty stub. A meeting recording in a tray test
+  starts a real watcher thread, and without the stub it would poll the real clipboard.
+- **Notifications switch (Task 6):** `_set_bool_setting` now updates `notifier.enabled` when
+  `notification_enabled` changes, so the switch takes effect at once and the screenshot
+  toasts follow it (before, muting worked only after a restart). Its confirmation no longer
+  says "Restart may be required."
+- **Task 7:** the README bullet and TC-10 in the repo are newer than the blocks in Task 7.
+  The bullet now says what the text skip lets through; TC-10 exercises the risky branches
+  (image already on the clipboard, Alt+Print, an Excel copy, a snip after stopping, the
+  opacity check).
+- **Branch:** the work ran on branch `feature/screenshots` in a git worktree, not on `main`
+  as Conventions say. Task 8 runs after the merge, or from the worktree.
+- **Test count:** 177 before this feature + 46 new = 223 (Task 6 expects 204), plus whatever
+  later review fixes add: 223+.
+
 ## Conventions
 
 - Work from the repo root `C:\Users\chris\Claude\AudioLogger` on `main`.
@@ -1128,12 +1177,26 @@ shots = find_screenshots(out)
 print("callbacks:", [(i, round(o, 1), p.name) for i, o, p in saved])
 print("found:", shots)
 print("size:", Image.open(out / shots[0].path).size if shots else None)
+print("opaque orange:",
+      Image.open(out / shots[0].path).convert("RGBA").getpixel((10, 10)) == (255, 165, 0, 255)
+      if shots else None)
 ```
 
-Run (bash, from the repo root): `.venv/Scripts/python.exe "$TEMP/audiologger-check/watcher_check.py" "$TEMP/audiologger-check/out"`
-Expected: one callback around 1.x s, one `Screenshot(at_s=1, ...)`, size `(320, 200)`
+Run it after the merge, from the repo root of `main` (the script puts `src` first on `sys.path`, so it
+tests the code of the directory it is started from). Before the merge, start it from the worktree
+instead and call the main checkout's venv by absolute path, because worktrees have no `.venv`:
+`C:/Users/chris/Claude/AudioLogger/.venv/Scripts/python.exe "$TEMP/audiologger-check/watcher_check.py" "$TEMP/audiologger-check/out"`
+After the merge, from the repo root: `.venv/Scripts/python.exe "$TEMP/audiologger-check/watcher_check.py" "$TEMP/audiologger-check/out"`
 
-- [ ] **Step 3: Push**
+Expected: one callback with `at_s` around 1–4 (the script waits 1.0 s, then PowerShell -STA plus
+loading WinForms takes about 1–3 s before the image lands on the clipboard), one
+`Screenshot(at_s=N, ...)` with the same whole second, size `(320, 200)`, and `opaque orange: True`.
+`False` here, with a pixel such as `(255, 165, 0, 0)`, is the transparent-DIBV5 regression.
+
+- [ ] **Step 3: Merge, then push**
+
+Merge `feature/screenshots` into `main` first (superpowers:finishing-a-development-branch), run the
+whole suite on `main` (expected: 223+ passed), and only then push:
 
 ```bash
 git push origin main
@@ -1141,4 +1204,4 @@ git push origin main
 
 - [ ] **Step 4: Hand over to the user**
 
-Ask the user to restart AudioLogger (tray → Quit, start again — the tray loads the capture code at start), then run TC-10 steps 1–8 once with a real `Win+Shift+S` snip. The Snipping Tool path cannot be triggered programmatically, so this is the proof.
+Ask the user to restart AudioLogger from the merged `main` (tray → Quit, start again — the tray loads the capture code at start), then run TC-10 once from start to finish with a real `Win+Shift+S` snip, `Alt+Print` and an Excel copy. The Snipping Tool path cannot be triggered programmatically, so this is the proof.

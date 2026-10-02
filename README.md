@@ -13,8 +13,9 @@ Windows tray utility for recording meetings (Slack, Discord, Teams, Zoom, ...) a
   - System audio → diarized into "Speaker 1", "Speaker 2", ...
 - Merged chronological Markdown transcript saved next to the audio.
 - Screenshots during meetings: take them as usual with `Win+Shift+S` or `Alt+Print`.
-  Every image put on the clipboard while a meeting is recorded is saved next to the
-  audio and embedded in the transcript at the moment it was taken.
+  Every screenshot (an image on the clipboard that isn't a text copy) taken while a
+  meeting is recorded is saved next to the audio, confirmed by a toast, and embedded in
+  the transcript at the moment it was taken.
 - Multilingual model (DE / EN / mixed handled out of the box).
 
 ## Requirements
@@ -111,7 +112,7 @@ recordings/
     mixed.wav         ← sum for easy playback
     transcript.md     ← final result
     transcript.json   ← raw WhisperX output (for re-processing)
-    screenshots/      ← images copied to the clipboard during the meeting
+    screenshots/      ← screenshots taken during the meeting (only if there were any)
     job.log           ← present only if transcription errored
 ```
 

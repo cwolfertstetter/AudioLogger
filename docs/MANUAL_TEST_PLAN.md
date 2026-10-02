@@ -79,15 +79,48 @@ Automated tests cover state machines and pure functions. The following scenarios
 8. **Expected:** No warning toast for the clean recording.
 
 ### TC-10: Screenshots during a meeting
-1. Copy some text to the clipboard, then start a meeting recording (`Ctrl+Alt+R`).
-2. After ~10 s, take a region snip with `Win+Shift+S`.
-3. **Expected:** A "Screenshot 1 saved" toast appears within a second, naming the moment.
-4. After a few more seconds, press `Alt+Print` with any window focused.
-5. **Expected:** A "Screenshot 2 saved" toast.
-6. Copy some text, stop the recording, wait for the transcript.
-7. **Expected:** `screenshots/` in the session folder holds two PNGs named after their
-   offsets; `transcript.md` has `**Screenshots:** 2` in the header and two
-   `Screenshot N` lines at the right places, rendering as images in a Markdown preview.
-8. **Expected:** Nothing was saved for the text copied before the recording or after it.
-9. Start a dictation (`Ctrl+Alt+D`), take a `Win+Shift+S` snip, stop.
-10. **Expected:** No screenshot toast and no `screenshots/` folder for the dictation.
+Only AudioLogger's own toasts count here ("Screenshot N saved"), not the Snipping Tool's
+notification from Windows.
+
+1. Get ready: a window with visible content (for `Alt+Print`) and Excel with a few
+   filled cells (Word with some text will do if Excel is not available).
+2. Take a region snip with `Win+Shift+S` and copy nothing else, so the clipboard already
+   holds an image, not text.
+3. Start a meeting recording (`Ctrl+Alt+R`) and keep talking, or play a clip, so the
+   transcript has speech around the screenshots.
+4. **Expected:** No toast for the image that was already on the clipboard (step 18 checks
+   that no PNG was saved for it either).
+5. After ~10 s, take another region snip with `Win+Shift+S`.
+6. **Expected:** A "Screenshot 1 saved" toast appears within a few seconds (it needs 1–2 s),
+   naming the moment, e.g. "at 00:10".
+7. After a few more seconds, press `Alt+Print` with the prepared window focused.
+8. **Expected:** A "Screenshot 2 saved" toast.
+9. In Excel, select a few cells and copy them (`Ctrl+C`); in Word, select some text and
+   copy it instead if Excel is not available.
+10. **Expected:** No toast and nothing saved: a copy that also carries text is content,
+    not a screenshot.
+11. Copy plain text, e.g. a line from Notepad.
+12. **Expected:** Nothing.
+13. **Optional (Notifications switch):** In the tray menu, choose Settings → Notifications →
+    Disabled. Take a `Win+Shift+S` snip, then choose Settings → Notifications → Enabled.
+14. **Expected (optional):** Switching off shows no confirmation (it is muted at once).
+    The snip gives no toast but is still saved, as a third PNG. Switching on shows
+    "Notifications set to Enabled." without "Restart may be required." If you did this
+    step, N is 3 in the checks below, otherwise 2.
+15. Stop the recording (`Ctrl+Alt+R`). Once the tray icon is no longer red, take another
+    `Win+Shift+S` snip.
+16. **Expected:** No toast and no extra PNG: nothing is saved after the recording has stopped.
+17. Wait for the transcript.
+18. **Expected:** `screenshots/` in the session folder holds exactly N PNGs, named after
+    their offsets (`screenshot_HH-MM-SS.png`), and no `.part` files. Nothing was saved for
+    the image from before the recording, the Excel or Word copy, the text copy or the snip
+    after stopping.
+19. **Expected:** `transcript.md` has `**Screenshots:** N` in the header and N `Screenshot`
+    lines at the right places (matching the moments in the toasts), rendering as images in
+    a Markdown preview. `transcript.json` lists the same N under `"screenshots"`.
+20. Open the PNG from the `Alt+Print` capture (the transcript's Screenshot 2).
+21. **Expected:** It is opaque and shows the window, not transparent or blank (regression
+    check for the DIBV5 alpha bug). Quick check:
+    `Image.open(path).convert("RGBA").getpixel((10, 10))[3]` is `255`.
+22. Start a dictation (`Ctrl+Alt+D`), take a `Win+Shift+S` snip, stop.
+23. **Expected:** No screenshot toast and no `screenshots/` folder for the dictation.
