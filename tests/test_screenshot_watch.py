@@ -63,7 +63,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from audiologger.screenshot_watch import MAX_READ_FAILURES, ClipboardScreenshotWatcher
+from audiologger.screenshot_watch import MAX_READ_FAILURES, ClipboardScreenshotWatcher, choose_image_format
 
 
 class FakeClipboard:
@@ -73,10 +73,11 @@ class FakeClipboard:
         self.seq = 100
         self.content = None
         self.locked = 0
+        self.bumps_during_read = 0
 
     def put(self, content):
-        self.seq += 1
         self.content = content
+        self.seq += 1
 
     def sequence_number(self) -> int:
         return self.seq
@@ -85,7 +86,11 @@ class FakeClipboard:
         if self.locked:
             self.locked -= 1
             raise OSError("clipboard is open in another program")
-        return None if isinstance(self.content, str) else self.content
+        content = None if isinstance(self.content, str) else self.content
+        if self.bumps_during_read:
+            self.bumps_during_read -= 1
+            self.seq += 1   # the writer adds another format while we read
+        return content
 
 
 class Clock:
@@ -237,3 +242,92 @@ def test_the_thread_picks_up_changes_by_itself_and_stops(tmp_path):
 
     assert len(files(tmp_path / "screenshots")) == 1
     assert not any(t.name == "screenshot-watch" for t in threading.enumerate())
+
+
+def test_a_copy_still_being_written_is_read_again_not_saved_twice(watch):
+    watch.w.start()
+    watch.clip.put(image())
+    watch.clip.bumps_during_read = 1
+
+    watch.w.poll_once()
+    assert files(watch.dir) == []
+
+    watch.w.poll_once()
+    watch.w.poll_once()
+    assert files(watch.dir) == ["screenshot_00-00-00.png"]
+
+
+def test_the_moment_is_when_the_copy_appeared_not_when_it_could_be_read(watch):
+    watch.w.start()
+    watch.clock.now += 60
+    watch.clip.put(image())
+    watch.clip.locked = 3
+    for _ in range(4):
+        watch.w.poll_once()
+        watch.clock.now += 1
+
+    assert files(watch.dir) == ["screenshot_00-01-00.png"]
+
+
+def test_failures_are_counted_per_change(watch):
+    watch.w.start()
+    watch.clip.put(image())
+    watch.clip.locked = 15
+    for _ in range(15):
+        watch.w.poll_once()
+
+    watch.clip.put(image())                 # a new copy, also hard to read
+    watch.clip.locked = MAX_READ_FAILURES - 1
+    for _ in range(MAX_READ_FAILURES - 1):
+        watch.w.poll_once()
+    watch.w.poll_once()                     # its last allowed try succeeds
+
+    assert len(files(watch.dir)) == 1
+
+
+def test_a_failing_callback_does_not_stop_the_watcher(tmp_path):
+    clip = FakeClipboard()
+
+    def explode(*_):
+        raise RuntimeError("toast failed")
+
+    w = ClipboardScreenshotWatcher(tmp_path, on_saved=explode, poll_s=3600, clipboard=clip)
+    w.start()
+    for _ in range(2):
+        clip.put(image())
+        w.poll_once()
+    w.stop()
+
+    assert len(files(tmp_path / "screenshots")) == 2
+
+
+def test_stop_without_start_is_harmless(tmp_path):
+    ClipboardScreenshotWatcher(tmp_path, clipboard=FakeClipboard()).stop()
+
+
+def test_a_watcher_is_single_use(watch):
+    watch.w.start()
+    with pytest.raises(RuntimeError):
+        watch.w.start()
+
+
+PNG = 0xC0F1  # stands in for the id Windows registers for "PNG"
+
+
+def test_the_snipping_tools_png_is_preferred():
+    assert choose_image_format({PNG, 17, 8}, PNG) == PNG
+
+
+def test_an_alt_print_bitmap_is_read_through_its_synthesised_dib():
+    assert choose_image_format({2, 17, 8}, PNG) == 17
+    assert choose_image_format({8}, PNG) == 8
+
+
+def test_a_copy_that_also_offers_text_is_not_a_screenshot():
+    """Excel cells come with a picture of themselves; they are content."""
+    assert choose_image_format({13, PNG, 8}, PNG) is None
+
+
+def test_no_image_format_means_nothing_to_save():
+    assert choose_image_format({13}, PNG) is None
+    assert choose_image_format(set(), PNG) is None

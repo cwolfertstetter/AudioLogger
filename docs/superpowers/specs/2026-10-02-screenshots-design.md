@@ -53,10 +53,15 @@ Rejected alternatives:
   result to the clipboard, and the user's clipboard must stay theirs.
 - If the new content is an image, it is saved as PNG. Text, file lists and
   anything else are ignored and count as handled.
+- A copy that also offers text — Excel cells, a Word selection — is skipped as
+  well. Office adds a picture of such copies, but they are content, not
+  screenshots; screenshots come without text.
 - A change is marked handled only after a successful read. If reading fails —
   typically another program holding the clipboard open — the same change is
   retried on the next poll. After 20 consecutive failures (5 s) for one change
-  it is given up and logged.
+  it is given up and logged. It is also re-read if the counter moved during the
+  read: writers add formats one by one, and reading mid-way would save the same
+  copy twice.
 - After a save, the tray shows a toast: *"Screenshot N saved"* / *"at 12:31"*.
   It follows the existing notifications setting. N counts screenshots in this
   recording.
@@ -65,9 +70,10 @@ Rejected alternatives:
 
 - `<session>/screenshots/`, created on the first save.
 - File name carries the offset from the start of the recording, in whole
-  seconds: `screenshot_HH-MM-SS.png`. The offset is measured from the
-  watcher's `start()`, which runs right after audio capture starts, so it sits
-  within milliseconds of the audio timeline. A second screenshot in the same second
+  seconds: `screenshot_HH-MM-SS.png`. The offset runs from the watcher's
+  `start()`, which happens right after audio capture starts, to the moment the
+  change was first noticed — not when a busy clipboard finally let it be read.
+  A second screenshot in the same second
   gets `screenshot_HH-MM-SS_2.png`, then `_3`, and so on.
 - The name is the only record of the timestamp. That survives a crash and lets
   re-transcription find screenshots without a separate list. Deleting a file by
@@ -105,10 +111,14 @@ Rejected alternatives:
   returns entries sorted by (offset, suffix).
 - `Screenshot` — frozen dataclass: `at_s: int`, `path: str` (relative, forward
   slashes).
-- `WindowsClipboard` — adapter with `sequence_number() -> int` (ctypes,
-  `user32.GetClipboardSequenceNumber`) and `read_image() -> PIL.Image | None`
-  (`PIL.ImageGrab.grabclipboard()`, returning only `Image` instances; raises on
-  a locked clipboard).
+- `WindowsClipboard` — reads the clipboard through the Win32 API with ctypes:
+  `GetClipboardSequenceNumber`, a format check with `IsClipboardFormatAvailable`
+  (so text copies never open the clipboard), then `OpenClipboard` /
+  `GetClipboardData`, decoding with Pillow's PNG and DIB plugins. Not
+  `PIL.ImageGrab.grabclipboard()`: on a busy clipboard it sleeps 500 ms holding
+  the GIL, which stalls the soundcard loopback threads and drops audio.
+  `choose_image_format` picks PNG, then DIBV5, then DIB, and nothing when text
+  is present.
 - `ClipboardScreenshotWatcher(session_dir, *, on_saved=None,
   clock=time.monotonic, poll_s=0.25, clipboard=None)` with `start()`, `stop()`
   and `poll_once()`. The thread is just `poll_once()` in a loop. `on_saved`
