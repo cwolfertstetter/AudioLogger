@@ -1,11 +1,35 @@
-"""Tray-side toast building. Constructed via __new__ so we never touch the
-real config/appdata directories that TrayApp.__init__ reaches for."""
+"""Tray-side toast building. Most tests construct the app via __new__ so we
+never touch the real config/appdata directories that TrayApp.__init__ reaches
+for; the few that need the real wiring build a TrayApp() with config_path,
+load_config and appdata_dir monkeypatched into tmp_path.
+
+Meeting recordings start a clipboard screenshot watcher, so no test here may
+reach the real Windows clipboard: see _no_real_clipboard below."""
 from pathlib import Path
 
 import pytest
 
 from audiologger.config import Config
 from audiologger.tray_app import TrayApp
+
+
+class _StubClipboard:
+    """An always-empty clipboard: the sequence number never moves."""
+
+    def sequence_number(self) -> int:
+        return 0
+
+    def read_image(self):
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _no_real_clipboard(monkeypatch):
+    """A real TrayApp() recording a meeting starts a ClipboardScreenshotWatcher:
+    a real thread polling the real clipboard, where a snip taken during the test
+    would add a toast. ClipboardScreenshotWatcher looks WindowsClipboard up when
+    it is constructed, so replacing it covers every test in this module."""
+    monkeypatch.setattr("audiologger.screenshot_watch.WindowsClipboard", _StubClipboard)
 
 
 class RecordingNotifier:
@@ -216,7 +240,7 @@ def test_screenshot_toast_shows_hours_in_long_recordings(app):
     assert app.notifier.calls[0]["message"] == "at 01:02:05"
 
 
-def test_meetings_get_a_clipboard_screenshot_watcher(tmp_path, monkeypatch):
+def test_controller_is_wired_to_the_screenshot_toast(tmp_path, monkeypatch):
     import audiologger.tray_app as ta
     from audiologger.screenshot_watch import ClipboardScreenshotWatcher
 
@@ -229,3 +253,4 @@ def test_meetings_get_a_clipboard_screenshot_watcher(tmp_path, monkeypatch):
 
     watcher = app.controller._screenshot_watcher_factory(tmp_path)
     assert isinstance(watcher, ClipboardScreenshotWatcher)
+    assert watcher._on_saved == app._notify_screenshot_saved
