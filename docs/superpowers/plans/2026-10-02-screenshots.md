@@ -64,7 +64,7 @@ a task's text differs, the code and the spec are the source of truth.
 
 ## Conventions
 
-- Work from the repo root `C:\Users\chris\Claude\AudioLogger` on `main`.
+- Work from the repo root on `main`.
 - Run tests with the project venv: `.venv/Scripts/python.exe -m pytest <path> -v`. The venv lives only in the main checkout; in a worktree call it by absolute path.
 - Write code that contains regex backslashes with the Write/Edit tools, not shell heredocs — the shell here eats backslashes.
 - End every commit message with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
@@ -1186,7 +1186,7 @@ print("opaque orange:",
 Run it after the merge, from the repo root of `main` (the script puts `src` first on `sys.path`, so it
 tests the code of the directory it is started from). Before the merge, start it from the worktree
 instead and call the main checkout's venv by absolute path, because worktrees have no `.venv`:
-`C:/Users/chris/Claude/AudioLogger/.venv/Scripts/python.exe "$TEMP/audiologger-check/watcher_check.py" "$TEMP/audiologger-check/out"`
+`<main checkout>/.venv/Scripts/python.exe "$TEMP/audiologger-check/watcher_check.py" "$TEMP/audiologger-check/out"`
 After the merge, from the repo root: `.venv/Scripts/python.exe "$TEMP/audiologger-check/watcher_check.py" "$TEMP/audiologger-check/out"`
 
 Expected: one callback with `at_s` around 1–4 (the script waits 1.0 s, then PowerShell -STA plus
