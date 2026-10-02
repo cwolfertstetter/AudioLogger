@@ -352,10 +352,22 @@ class FakeWatcher:
         self.stopped = True
 
 
-def make_controller(cfg, factory):
+class WatcherFactory:
+    """A screenshot_watcher_factory that remembers every watcher it has made."""
+
+    def __init__(self):
+        self.watchers: list[FakeWatcher] = []
+
+    def __call__(self, session_dir: Path) -> FakeWatcher:
+        watcher = FakeWatcher(session_dir)
+        self.watchers.append(watcher)
+        return watcher
+
+
+def make_controller(cfg, factory, capture_factory=FakeCapture):
     return RecordingController(
         config=cfg,
-        capture_factory=FakeCapture,
+        capture_factory=capture_factory,
         mix_fn=MagicMock(),
         enqueue_fn=MagicMock(),
         clock=lambda: datetime(2026, 5, 18, 14, 32, 15),
@@ -364,11 +376,11 @@ def make_controller(cfg, factory):
 
 
 def test_a_meeting_recording_watches_for_screenshots(cfg):
-    watchers = []
-    c = make_controller(cfg, lambda d: watchers.append(FakeWatcher(d)) or watchers[-1])
+    factory = WatcherFactory()
+    c = make_controller(cfg, factory)
 
     c.toggle()
-    [w] = watchers
+    [w] = factory.watchers
     assert w.started
     assert w.session_dir == cfg.output_dir / "2026-05-18_14-32-15"
 
@@ -377,13 +389,30 @@ def test_a_meeting_recording_watches_for_screenshots(cfg):
 
 
 def test_dictation_does_not_watch_for_screenshots(cfg):
-    watchers = []
-    c = make_controller(cfg, lambda d: watchers.append(FakeWatcher(d)) or watchers[-1])
+    factory = WatcherFactory()
+    c = make_controller(cfg, factory)
 
     c.toggle("dictation")
     c.toggle("dictation")
 
-    assert watchers == []
+    assert factory.watchers == []
+
+
+def test_appending_a_note_does_not_watch_for_screenshots(cfg):
+    """dictation_extend ("Append Note") is a dictation mode, so no watcher either."""
+    prior = cfg.output_dir / "2026-05-18_10-00-00"
+    prior.mkdir(parents=True)
+    (prior / "mode.txt").write_text("dictation", encoding="utf-8")
+    factory = WatcherFactory()
+    c = make_controller(cfg, factory)
+
+    c.toggle("dictation_extend")
+    session = cfg.output_dir / "2026-05-18_14-32-15"
+    # Guard against the test passing only because the mode fell back to plain dictation.
+    assert (session / "mode.txt").read_text(encoding="utf-8") == "dictation_extend"
+    c.toggle("dictation_extend")
+
+    assert factory.watchers == []
 
 
 def test_a_watcher_that_cannot_start_does_not_stop_the_recording(cfg):
@@ -394,3 +423,54 @@ def test_a_watcher_that_cannot_start_does_not_stop_the_recording(cfg):
 
     c.toggle()
     assert c.state is RecordingState.IDLE
+
+
+def test_a_watcher_that_cannot_be_created_does_not_stop_the_recording(cfg):
+    def factory(session_dir):
+        raise OSError("no clipboard")
+
+    c = make_controller(cfg, factory)
+
+    c.toggle()
+    assert c.state is RecordingState.RECORDING
+
+    c.toggle()
+    assert c.state is RecordingState.IDLE
+
+
+def test_a_watcher_that_cannot_stop_does_not_break_the_stop_path(cfg):
+    """Without the guard the controller would stay in STOPPING forever."""
+
+    class StuckWatcher(FakeWatcher):
+        def stop(self) -> None:
+            raise OSError("thread did not end")
+
+    c = make_controller(cfg, StuckWatcher)
+
+    c.toggle()
+    c.toggle()
+
+    assert c.state is RecordingState.IDLE
+    c._enqueue_fn.assert_called_once_with(cfg.output_dir / "2026-05-18_14-32-15")
+
+
+def test_the_watcher_stops_before_the_capture(cfg):
+    """Stop order is part of the contract: the watcher first, then the capture."""
+    calls: list[str] = []
+
+    class LoggingCapture(FakeCapture):
+        def stop(self) -> None:
+            calls.append("capture.stop")
+            super().stop()
+
+    class LoggingWatcher(FakeWatcher):
+        def stop(self) -> None:
+            calls.append("watcher.stop")
+            super().stop()
+
+    c = make_controller(cfg, LoggingWatcher, capture_factory=LoggingCapture)
+
+    c.toggle()
+    c.toggle()
+
+    assert calls == ["watcher.stop", "capture.stop"]

@@ -28,16 +28,17 @@ class CaptureLike(Protocol):
 CaptureFactory = Callable[[Path, int, str, list[str], bool], CaptureLike]
 """(session_dir, sample_rate, audio_source, filtered_app_names, mic_only) -> CaptureLike"""
 
+
 class WatcherLike(Protocol):
     def start(self) -> None: ...
     def stop(self) -> None: ...
 
 
-NotifyFn = Callable[[Path, list[str]], None]
-"""(session_dir, warnings) -> None — surfaces capture warnings to the user."""
-
 ScreenshotWatcherFactory = Callable[[Path], WatcherLike]
 """(session_dir) -> a watcher that saves screenshots taken during the recording."""
+
+NotifyFn = Callable[[Path, list[str]], None]
+"""(session_dir, warnings) -> None — surfaces capture warnings to the user."""
 
 
 class RecordingController:
@@ -61,9 +62,9 @@ class RecordingController:
         self._clock = clock
         self._notify_fn = notify_fn
         self._screenshot_watcher_factory = screenshot_watcher_factory
-        self._current_watcher: WatcherLike | None = None
         self._state = RecordingState.IDLE
         self._current_capture: CaptureLike | None = None
+        self._current_watcher: WatcherLike | None = None
         self._current_session: Path | None = None
         self._current_mode: str | None = None
 
