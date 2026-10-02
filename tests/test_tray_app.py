@@ -198,3 +198,34 @@ def test_retranscribe_with_only_the_active_recording_does_nothing(retry_app, tmp
 
     assert retry_app.queue.enqueued == []
     assert retry_app.notifier.calls, "the user should hear why nothing happened"
+
+
+# --- screenshots ---------------------------------------------------------------------
+
+def test_screenshot_toast_names_the_screenshot_and_the_moment(app):
+    app._notify_screenshot_saved(3, 751.6, Path("screenshots/screenshot_00-12-31.png"))
+
+    assert app.notifier.calls == [
+        {"title": "Screenshot 3 saved", "message": "at 12:31", "launch": "", "actions": []}
+    ]
+
+
+def test_screenshot_toast_shows_hours_in_long_recordings(app):
+    app._notify_screenshot_saved(1, 3725.0, Path("screenshots/screenshot_01-02-05.png"))
+
+    assert app.notifier.calls[0]["message"] == "at 01:02:05"
+
+
+def test_meetings_get_a_clipboard_screenshot_watcher(tmp_path, monkeypatch):
+    import audiologger.tray_app as ta
+    from audiologger.screenshot_watch import ClipboardScreenshotWatcher
+
+    cfg = Config(output_dir=tmp_path / "recs")
+    monkeypatch.setattr(ta, "config_path", lambda: tmp_path / "config.yaml")
+    monkeypatch.setattr(ta, "load_config", lambda _p: cfg)
+    monkeypatch.setattr(ta, "appdata_dir", lambda: tmp_path / "appdata")
+
+    app = ta.TrayApp()
+
+    watcher = app.controller._screenshot_watcher_factory(tmp_path)
+    assert isinstance(watcher, ClipboardScreenshotWatcher)

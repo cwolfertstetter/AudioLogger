@@ -21,6 +21,8 @@ from audiologger.job_queue import TranscriptionJobQueue
 from audiologger.notifications import Action, Notifier
 from audiologger.paths import appdata_dir, config_path
 from audiologger.recovery import find_orphaned_sessions
+from audiologger.screenshot_watch import ClipboardScreenshotWatcher
+from audiologger.transcript_merger import format_timestamp
 
 
 log = logging.getLogger("tray_app")
@@ -40,6 +42,7 @@ class TrayApp:
             mix_fn=mix_to_file,
             enqueue_fn=self._on_recording_finished,
             notify_fn=self._notify_capture_warnings,
+            screenshot_watcher_factory=self._make_screenshot_watcher,
         )
         self.hotkey = HotkeyManager()
         self.dictation_hotkey = HotkeyManager()
@@ -651,6 +654,16 @@ class TrayApp:
             launch=folder_uri,
             actions=actions,
         )
+
+    def _make_screenshot_watcher(self, session_dir: Path) -> ClipboardScreenshotWatcher:
+        return ClipboardScreenshotWatcher(session_dir, on_saved=self._notify_screenshot_saved)
+
+    def _notify_screenshot_saved(self, index: int, offset_s: float, path: Path) -> None:
+        """Confirm each clipboard screenshot; runs on the watcher's polling thread."""
+        ts = format_timestamp(offset_s)
+        if ts.startswith("00:"):
+            ts = ts[3:]
+        self.notifier.notify(f"Screenshot {index} saved", f"at {ts}")
 
 
 # ---------------------------------------------------------------------------
