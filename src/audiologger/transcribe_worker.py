@@ -30,6 +30,7 @@ import numpy as np
 from audiologger.audio_mix import append_wav
 from audiologger.config import Config, load_config
 from audiologger.paths import config_path
+from audiologger.screenshot_watch import find_screenshots
 from audiologger.segment import Segment
 from audiologger.transcript_merger import merge_segments, render_markdown
 
@@ -712,6 +713,7 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
         # whisperx 3.8+ uses speaker-diarization-community-1; older versions used 3.1.
         model_label += " + pyannote/speaker-diarization-community-1"
 
+    screenshots = find_screenshots(session_dir)
     md = render_markdown(
         merged,
         recorded_at=recorded_at_str,
@@ -719,6 +721,7 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
         source_label=_source_label(session_dir, mic_wav.exists(), sys_wav.exists()),
         model_label=model_label,
         warnings=warnings,
+        screenshots=screenshots,
     )
     (session_dir / "transcript.md").write_text(md, encoding="utf-8")
 
@@ -727,6 +730,7 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
         "system_segments": [asdict(s) for s in sys_segments],
         "merged": [asdict(s) for s in merged],
         "warnings": warnings,
+        "screenshots": [asdict(s) for s in screenshots],
     }
     (session_dir / "transcript.json").write_text(
         json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
