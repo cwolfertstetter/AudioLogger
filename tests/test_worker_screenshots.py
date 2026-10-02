@@ -1,5 +1,6 @@
 """The worker finds screenshots in the session folder by their file names."""
 import json
+import logging
 import wave
 from pathlib import Path
 
@@ -49,6 +50,27 @@ def test_screenshots_on_disk_land_in_both_transcript_files(tmp_path):
             "![Screenshot 1](screenshots/screenshot_00-00-00.png)") in md
     raw = json.loads((session / "transcript.json").read_text(encoding="utf-8"))
     assert raw["screenshots"] == [{"at_s": 0, "path": "screenshots/screenshot_00-00-00.png"}]
+
+
+def test_a_failing_screenshot_lookup_never_costs_the_transcript(tmp_path, monkeypatch, caplog):
+    """Screenshots are a bonus: if finding them fails (unreadable folder, a
+    permission error), the transcript is written without them."""
+    session = make_session(tmp_path)
+
+    def unreadable(_session_dir):
+        raise PermissionError("screenshots folder is not readable")
+
+    monkeypatch.setattr("audiologger.transcribe_worker.find_screenshots", unreadable)
+
+    with caplog.at_level(logging.ERROR, logger="transcribe_worker"):
+        _process_meeting_session(session, OneLinePipeline())
+
+    md = (session / "transcript.md").read_text(encoding="utf-8")
+    assert "aus system.wav" in md
+    assert "Screenshots" not in md
+    raw = json.loads((session / "transcript.json").read_text(encoding="utf-8"))
+    assert raw["screenshots"] == []
+    assert any("screenshot" in r.getMessage().lower() and r.exc_info for r in caplog.records)
 
 
 def test_a_recording_without_screenshots_lists_none(tmp_path):

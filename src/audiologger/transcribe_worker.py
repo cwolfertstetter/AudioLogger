@@ -713,7 +713,14 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
         # whisperx 3.8+ uses speaker-diarization-community-1; older versions used 3.1.
         model_label += " + pyannote/speaker-diarization-community-1"
 
-    screenshots = find_screenshots(session_dir)
+    # Screenshots are a bonus: whatever goes wrong finding them (an unreadable
+    # folder, say), the transcript is still written, just without them.
+    try:
+        screenshots = find_screenshots(session_dir)
+    except Exception:
+        log.exception("Could not look up screenshots in %s; transcribing without them",
+                      session_dir.name)
+        screenshots = []
     md = render_markdown(
         merged,
         recorded_at=recorded_at_str,
