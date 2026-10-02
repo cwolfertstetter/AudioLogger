@@ -77,3 +77,17 @@ Automated tests cover state machines and pure functions. The following scenarios
 6. **Expected:** `%APPDATA%/AudioLogger/tray.log` also contains a `Capture warning for <session>: ...` line.
 7. Re-enable the mic, record again, stop.
 8. **Expected:** No warning toast for the clean recording.
+
+### TC-10: Screenshots during a meeting
+1. Copy some text to the clipboard, then start a meeting recording (`Ctrl+Alt+R`).
+2. After ~10 s, take a region snip with `Win+Shift+S`.
+3. **Expected:** A "Screenshot 1 saved" toast appears within a second, naming the moment.
+4. After a few more seconds, press `Alt+Print` with any window focused.
+5. **Expected:** A "Screenshot 2 saved" toast.
+6. Copy some text, stop the recording, wait for the transcript.
+7. **Expected:** `screenshots/` in the session folder holds two PNGs named after their
+   offsets; `transcript.md` has `**Screenshots:** 2` in the header and two
+   `Screenshot N` lines at the right places, rendering as images in a Markdown preview.
+8. **Expected:** Nothing was saved for the text copied before the recording or after it.
+9. Start a dictation (`Ctrl+Alt+D`), take a `Win+Shift+S` snip, stop.
+10. **Expected:** No screenshot toast and no `screenshots/` folder for the dictation.
