@@ -221,16 +221,15 @@ class ClipboardScreenshotWatcher:
         self._thread.start()
 
     def stop(self) -> None:
+        """Ends the watcher; the thread takes a last look at the clipboard first.
+
+        Waits at most 2 s for that, so a clipboard owner that never answers
+        cannot hold up the caller (the hotkey thread, which stops the audio
+        capture next). A watcher that was never started does nothing at all.
+        """
         self._stop.set()
-        if self._thread is None:
-            return      # never started: nothing was recorded, the clipboard stays untouched
-        self._thread.join(timeout=2)
-        if self._thread.is_alive():
-            return      # still inside a poll; a second one here would race it
-        # The thread polls every 0.25 s, so a snip taken in the last fraction of
-        # a second before the recording stops is still unread. Look once more.
-        # poll_once() logs and swallows every error itself, so this cannot raise.
-        self.poll_once()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
 
     def poll_once(self) -> None:
         try:
@@ -288,3 +287,9 @@ class ClipboardScreenshotWatcher:
     def _run(self) -> None:
         while not self._stop.wait(self._poll_s):
             self.poll_once()
+        # The loop polls every 0.25 s, so a snip taken in the last fraction of a
+        # second before stop() is still unread. Look once more, here on the
+        # watcher thread: stop()'s join bounds the wait, and a clipboard owner
+        # that hangs while rendering cannot block the hotkey thread.
+        # poll_once() logs and swallows every error itself.
+        self.poll_once()

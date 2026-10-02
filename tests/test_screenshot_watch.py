@@ -308,7 +308,8 @@ def test_stop_without_start_is_harmless(tmp_path):
 def test_a_snip_taken_just_before_stop_is_not_lost(watch):
     """The thread polls every 0.25 s; a snip in the last fraction of a second
     would otherwise vanish. With poll_s=3600 the thread never polls by itself
-    (it waits before polling), so only stop()'s final poll can save this one."""
+    (it waits before polling), so only the thread's final poll, which stop()
+    waits for, can save this one."""
     watch.w.start()
     watch.clock.now += 42
     watch.clip.put(image())
