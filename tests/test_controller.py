@@ -332,3 +332,65 @@ def test_current_session_names_the_folder_being_recorded(controller, cfg):
     assert controller.current_session == cfg.output_dir / "2026-05-18_14-32-15"
     controller.toggle()  # stop
     assert controller.current_session is None
+
+
+# --- screenshot watcher ------------------------------------------------------------
+
+class FakeWatcher:
+    def __init__(self, session_dir: Path, fail_on_start: bool = False):
+        self.session_dir = session_dir
+        self.started = False
+        self.stopped = False
+        self._fail = fail_on_start
+
+    def start(self) -> None:
+        if self._fail:
+            raise OSError("clipboard unavailable")
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def make_controller(cfg, factory):
+    return RecordingController(
+        config=cfg,
+        capture_factory=FakeCapture,
+        mix_fn=MagicMock(),
+        enqueue_fn=MagicMock(),
+        clock=lambda: datetime(2026, 5, 18, 14, 32, 15),
+        screenshot_watcher_factory=factory,
+    )
+
+
+def test_a_meeting_recording_watches_for_screenshots(cfg):
+    watchers = []
+    c = make_controller(cfg, lambda d: watchers.append(FakeWatcher(d)) or watchers[-1])
+
+    c.toggle()
+    [w] = watchers
+    assert w.started
+    assert w.session_dir == cfg.output_dir / "2026-05-18_14-32-15"
+
+    c.toggle()
+    assert w.stopped
+
+
+def test_dictation_does_not_watch_for_screenshots(cfg):
+    watchers = []
+    c = make_controller(cfg, lambda d: watchers.append(FakeWatcher(d)) or watchers[-1])
+
+    c.toggle("dictation")
+    c.toggle("dictation")
+
+    assert watchers == []
+
+
+def test_a_watcher_that_cannot_start_does_not_stop_the_recording(cfg):
+    c = make_controller(cfg, lambda d: FakeWatcher(d, fail_on_start=True))
+
+    c.toggle()
+    assert c.state is RecordingState.RECORDING
+
+    c.toggle()
+    assert c.state is RecordingState.IDLE

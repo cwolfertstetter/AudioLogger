@@ -28,8 +28,16 @@ class CaptureLike(Protocol):
 CaptureFactory = Callable[[Path, int, str, list[str], bool], CaptureLike]
 """(session_dir, sample_rate, audio_source, filtered_app_names, mic_only) -> CaptureLike"""
 
+class WatcherLike(Protocol):
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+
+
 NotifyFn = Callable[[Path, list[str]], None]
 """(session_dir, warnings) -> None — surfaces capture warnings to the user."""
+
+ScreenshotWatcherFactory = Callable[[Path], WatcherLike]
+"""(session_dir) -> a watcher that saves screenshots taken during the recording."""
 
 
 class RecordingController:
@@ -44,6 +52,7 @@ class RecordingController:
         enqueue_fn: Callable[[Path], None],
         clock: Callable[[], datetime] = datetime.now,
         notify_fn: NotifyFn | None = None,
+        screenshot_watcher_factory: ScreenshotWatcherFactory | None = None,
     ):
         self._config = config
         self._capture_factory = capture_factory
@@ -51,6 +60,8 @@ class RecordingController:
         self._enqueue_fn = enqueue_fn
         self._clock = clock
         self._notify_fn = notify_fn
+        self._screenshot_watcher_factory = screenshot_watcher_factory
+        self._current_watcher: WatcherLike | None = None
         self._state = RecordingState.IDLE
         self._current_capture: CaptureLike | None = None
         self._current_session: Path | None = None
@@ -109,15 +120,33 @@ class RecordingController:
             mode in ("dictation", "dictation_extend"),
         )
         capture.start()
+        if mode == "meeting" and self._screenshot_watcher_factory is not None:
+            self._current_watcher = self._start_watcher(session)
         self._current_capture = capture
         self._current_session = session
         self._current_mode = mode
         self._state = RecordingState.RECORDING
 
+    def _start_watcher(self, session: Path) -> WatcherLike | None:
+        """Screenshots are a bonus: if the watcher cannot start, record anyway."""
+        try:
+            watcher = self._screenshot_watcher_factory(session)
+            watcher.start()
+            return watcher
+        except Exception:
+            log.exception("Screenshot watcher could not start for %s", session.name)
+            return None
+
     def _stop(self) -> None:
         self._state = RecordingState.STOPPING
         if self._current_capture is None or self._current_session is None:
             raise RuntimeError("_stop called without active capture/session")
+        watcher, self._current_watcher = self._current_watcher, None
+        if watcher is not None:
+            try:
+                watcher.stop()
+            except Exception:
+                log.exception("Screenshot watcher did not stop cleanly")
         capture = self._current_capture
         session = self._current_session
         capture.stop()
