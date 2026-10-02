@@ -117,8 +117,9 @@ Rejected alternatives:
   `GetClipboardData`, decoding with Pillow's PNG and DIB plugins. Not
   `PIL.ImageGrab.grabclipboard()`: on a busy clipboard it sleeps 500 ms holding
   the GIL, which stalls the soundcard loopback threads and drops audio.
-  `choose_image_format` picks PNG, then DIBV5, then DIB, and nothing when text
-  is present.
+  `choose_image_format` picks PNG, then DIB, then DIBV5 (Pillow decodes DIBV5's
+  usually all-zero alpha as fully transparent), and nothing when text is
+  present.
 - `ClipboardScreenshotWatcher(session_dir, *, on_saved=None,
   clock=time.monotonic, poll_s=0.25, clipboard=None)` with `start()`, `stop()`
   and `poll_once()`. The thread is just `poll_once()` in a loop. `on_saved`

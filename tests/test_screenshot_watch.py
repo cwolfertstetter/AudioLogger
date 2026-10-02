@@ -318,9 +318,10 @@ def test_the_snipping_tools_png_is_preferred():
     assert choose_image_format({PNG, 17, 8}, PNG) == PNG
 
 
-def test_an_alt_print_bitmap_is_read_through_its_synthesised_dib():
-    assert choose_image_format({2, 17, 8}, PNG) == 17
-    assert choose_image_format({8}, PNG) == 8
+def test_an_alt_print_bitmap_is_read_as_plain_dib():
+    """DIBV5 decodes with GDI's all-zero alpha, i.e. fully transparent."""
+    assert choose_image_format({2, 17, 8}, PNG) == 8
+    assert choose_image_format({17}, PNG) == 17
 
 
 def test_a_copy_that_also_offers_text_is_not_a_screenshot():

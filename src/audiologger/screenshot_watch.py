@@ -72,12 +72,14 @@ def choose_image_format(available: Container[int], png_format: int) -> int | Non
     A screenshot comes without text. A copy that also offers text -- Excel
     cells, a Word selection -- is somebody copying content, even though Office
     adds a picture of it, and is skipped. Among image formats PNG wins (it keeps
-    transparency), then DIBV5, then plain DIB, which Windows also synthesises
-    from the bitmap Alt+Print stores.
+    real transparency), then plain DIB, which Windows always provides, also for
+    the bitmap Alt+Print stores. DIBV5 comes last: Pillow reads its usually
+    all-zero alpha channel literally and the screenshot would come out fully
+    transparent.
     """
     if _CF_UNICODETEXT in available:
         return None
-    for fmt in (png_format, _CF_DIBV5, _CF_DIB):
+    for fmt in (png_format, _CF_DIB, _CF_DIBV5):
         if fmt in available:
             return fmt
     return None
@@ -140,14 +142,22 @@ class WindowsClipboard:
         if fmt is None:
             return None
         if not user32.OpenClipboard(None):
-            raise OSError("clipboard is open in another program")
+            raise OSError(
+                f"clipboard is open in another program (error {self._ctypes.get_last_error()})"
+            )
         try:
             handle = user32.GetClipboardData(fmt)
             if not handle:
-                return None  # replaced between the format check and the read
+                # Replaced since the format check (the counter re-check will
+                # notice), or the owner failed to render it: retry either way.
+                raise OSError(
+                    f"clipboard data unavailable (error {self._ctypes.get_last_error()})"
+                )
             pointer = kernel32.GlobalLock(handle)
             if not pointer:
-                raise OSError("could not lock the clipboard data")
+                raise OSError(
+                    f"could not lock the clipboard data (error {self._ctypes.get_last_error()})"
+                )
             try:
                 data = self._ctypes.string_at(pointer, kernel32.GlobalSize(handle))
             finally:
