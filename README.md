@@ -11,12 +11,23 @@ Windows tray utility for recording meetings (Slack, Discord, Teams, Zoom, ...) a
 - For meetings, both streams are transcribed independently:
   - Mic audio → labeled "Me".
   - System audio → diarized into "Speaker 1", "Speaker 2", ...
-- Merged chronological Markdown transcript saved next to the audio.
+- System audio is the loopback of **every output device**, mixed: a call playing on a
+  headset is recorded even when the Windows default output is the laptop speaker.
+- Survives microphone dropouts (a USB dock or Thunderbolt device blinking off): the
+  default microphone is reopened, the gap is filled with silence so the timeline stays
+  intact, and a toast reports it after the recording.
+- Merged chronological Markdown transcript saved next to the audio, one paragraph per
+  line so it reads cleanly in any Markdown preview.
 - Screenshots during meetings: take them as usual with `Win+Shift+S` or `Alt+Print`.
   Every screenshot (an image on the clipboard that isn't a text copy) taken while a
   meeting is recorded is saved next to the audio, confirmed by a toast, and embedded in
   the transcript at the moment it was taken.
-- Multilingual model (DE / EN / mixed handled out of the box).
+- Multilingual model (DE / EN / mixed handled out of the box). Your mic track uses the
+  language detected on the system audio (when that carried at least 20 s of speech),
+  otherwise the configured `language` — detection on a mostly silent mic is unreliable.
+- Transcription cleanup: quiet tracks are boosted before Whisper sees them, and
+  segments over silence or Whisper's subtitle boilerplate ("Untertitel im Auftrag
+  des ZDF", "Thanks for watching") are dropped.
 
 ## Requirements
 
@@ -61,11 +72,12 @@ First launch writes `%APPDATA%/AudioLogger/config.yaml`. Edit it directly, or us
 | `dictation_model`       | `medium`               | Dictation model. Same options; smaller = faster, slightly less accurate |
 | `device`                | `cuda`                 | `cuda` or `cpu`                                         |
 | `compute_type`          | `float16`              | GPU: `float16`. CPU: use `int8`                         |
+| `language`              | `de`                   | Mic-track language when the system audio has too little speech to take it from |
 | `diarization_enabled`   | `true`                 | Requires `huggingface_token`                            |
 | `huggingface_token`     | `null`                 | Paste your HF token here for diarization                |
-| `audio_source`          | `all`                  | `all` (system loopback) or `apps` (per-app filter)      |
+| `audio_source`          | `all`                  | `all` (loopback of every output device) or `apps` (per-app filter) |
 | `filtered_app_names`    | `[]`                   | e.g. `["Discord.exe", "Slack.exe"]` when `audio_source: apps` |
-| `notification_enabled`  | `true`                 | Windows toast notifications                             |
+| `notification_enabled`  | `true`                 | Windows toast notifications. The tray switch applies at once — handy when sharing your screen |
 | `worker_prewarm`        | `true`                 | Load transcription models when tray starts (~3-5 GB VRAM, ~15 s startup). Set `false` to lazy-load. |
 | `worker_warm_seconds`   | `600`                  | Seconds the worker stays alive idle between jobs. Lower = less VRAM held, higher = faster repeat transcriptions. Set very large for "always warm". |
 
@@ -108,7 +120,7 @@ accepts a `.lnk` that points at one.)
 recordings/
   2026-05-18_14-32-15/
     mic.wav           ← your microphone
-    system.wav        ← everything from system audio
+    system.wav        ← all output devices, mixed when the recording stops
     mixed.wav         ← sum for easy playback
     transcript.md     ← final result
     transcript.json   ← raw WhisperX output (for re-processing)
@@ -122,7 +134,11 @@ recordings/
 - **Diarization disabled warning in transcript:** Set `huggingface_token` in config and accept model terms at <https://huggingface.co/pyannote/speaker-diarization-community-1> (and <https://huggingface.co/pyannote/speaker-diarization-3.1> for older whisperx versions). Worker logs a `GatedRepoError` when the right model hasn't been accepted yet.
 - **First-run transcription hangs for several minutes:** WhisperX is downloading the ~3 GB model. Subsequent runs use the cache in `%USERPROFILE%/.cache`.
 - **"App-Filter nicht verfügbar" toast:** Per-app loopback needs Windows 10 21H2+ and a `pyaudiowpatch` build that exposes `PaWasapiStreamInfo`. The app silently falls back to full-system loopback for that recording.
-- **App crashed mid-recording:** Restart `audiologger` — orphan sessions are auto-detected and queued for transcription.
+- **App crashed mid-recording:** Restart `audiologger` — orphan sessions are auto-detected, their per-device system-audio parts (`_loopback_NN_at….wav`) merged, and queued for transcription. Screenshots already saved are included.
+- **Tray icon hangs or Quit doesn't end it:** run `scripts/stop-audiologger.bat`; it kills the tray and worker processes.
+- **"Microphone dropped out …" toast:** the mic vanished mid-recording (often a dock or Thunderbolt power-state change). The gap was filled with silence; if the toast names another device, recording continued on whatever Windows made the default.
+- **"No system audio was captured from any output device" toast:** nothing played on any output while recording. If this was a call, check that the call app wasn't muted and that its device is enabled in Windows Sound settings.
+- **A transcript is missing or wrong:** tray → "Re-transcribe Last Recording" runs the newest finished session through the current pipeline again.
 
 ## Development
 
