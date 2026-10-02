@@ -40,7 +40,7 @@ def screenshot_file_name(offset_s: float, taken: set[str]) -> str:
 
 
 def find_screenshots(session_dir: Path) -> list[Screenshot]:
-    """Screenshots saved in `session_dir`, in the order they were taken."""
+    """Screenshots saved for the session in `session_dir`, in the order they were taken."""
     folder = session_dir / SCREENSHOT_DIR
     if not folder.is_dir():
         return []

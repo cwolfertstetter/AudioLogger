@@ -35,6 +35,15 @@ def test_screenshots_are_found_by_name_in_time_order(tmp_path):
     ]
 
 
+def test_suffixes_sort_as_numbers_not_as_text(tmp_path):
+    _touch(tmp_path / "screenshots", "screenshot_00-00-07_10.png", "screenshot_00-00-07_2.png")
+
+    assert [s.path for s in find_screenshots(tmp_path)] == [
+        "screenshots/screenshot_00-00-07_2.png",
+        "screenshots/screenshot_00-00-07_10.png",
+    ]
+
+
 def test_other_files_in_the_folder_are_ignored(tmp_path):
     _touch(tmp_path / "screenshots", "notes.txt", "screenshot.bmp", "screenshot_00-00-05.png")
 
