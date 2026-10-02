@@ -36,9 +36,10 @@ a task's text differs, the code and the spec are the source of truth.
   `screenshots/` folder is created on the first save attempt.
 - **Single-use guard (Task 2):** a second `start()` raises `RuntimeError`, and `stop()` no
   longer clears the thread reference.
-- **Final poll on stop (Task 2):** after the thread has ended, `stop()` polls once more, so
-  a snip taken just before stopping is kept. It skips this when the thread is still inside
-  a poll after the 2 s join, or was never started.
+- **Final poll on stop (Task 2):** when the stop flag is set, the watcher thread makes one
+  last poll before it ends, so a snip taken just before stopping is kept. `stop()` itself
+  only sets the flag and joins for up to 2 s, so a clipboard owner that hangs cannot block
+  the hotkey thread, and `on_saved` stays on the watcher thread.
 - **Worker guard (Task 4):** `_process_meeting_session` wraps `find_screenshots` in
   try/except; a failing lookup is logged and the transcript is written without screenshots.
 - **Whole-second tie rule (Task 3):** `render_markdown` compares `at_s` with

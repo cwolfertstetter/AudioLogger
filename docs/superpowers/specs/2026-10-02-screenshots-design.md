@@ -43,8 +43,8 @@ Rejected alternatives:
   voice notes; "Append Note" also extends an older session, which would
   complicate offsets.
 - A watcher thread starts right after audio capture starts and stops when the
-  recording stops. After the thread has ended, `stop()` makes one final poll, so
-  a snip taken just before stopping is kept.
+  recording stops. When it is told to stop, the thread makes one final poll
+  before it ends, so a snip taken just before stopping is kept.
 - Every 0.25 s it reads `GetClipboardSequenceNumber()`, a counter Windows
   increments on every clipboard change. Reading it changes nothing and needs no
   clipboard lock. Only when the counter moved does the watcher read the
@@ -136,11 +136,13 @@ Rejected alternatives:
   present.
 - `ClipboardScreenshotWatcher(session_dir, *, on_saved=None,
   clock=time.monotonic, poll_s=0.25, clipboard=None)` with `start()`, `stop()`
-  and `poll_once()`. The thread is just `poll_once()` in a loop; `stop()` ends
-  it and then polls once more, unless the thread is still inside a poll after
-  the 2 s join (a second poll would race it) or was never started. `on_saved`
-  receives `(index, offset_s, path)`. Every exception inside a poll is caught
-  and logged; the watcher never ends because of one, and never touches audio.
+  and `poll_once()`. The thread is `poll_once()` in a loop, plus one last
+  `poll_once()` after the loop ends. `stop()` only sets the stop flag and joins
+  for at most 2 s, so a clipboard owner that hangs cannot hold up the hotkey
+  thread. A watcher that was never started does nothing in `stop()`. `on_saved`,
+  which receives `(index, offset_s, path)`, runs on the watcher thread. Every
+  exception inside a poll is caught and logged; the watcher never ends because
+  of one, and never touches audio.
 
 ### Changed
 
@@ -176,7 +178,7 @@ Rejected alternatives:
 | Watcher cannot be created or started | Logged, recording continues without screenshots |
 | Screenshot lookup fails in the worker | Logged, transcript written without screenshots |
 | Crash mid-recording | PNGs are already on disk; recovery transcribes them because the worker finds them by name |
-| Watcher thread does not stop | `stop()` joins with a 2 s timeout and skips the final poll; it is a daemon thread |
+| Watcher thread does not stop in time | `stop()` joins with a 2 s timeout and returns; the daemon thread finishes its poll and the final one on its own |
 
 Audio capture never depends on the watcher.
 
