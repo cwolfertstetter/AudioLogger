@@ -636,7 +636,7 @@ def render_markdown(
     lines.extend(["", "---", ""])
     next_shot = 0
     for seg in segments:
-        while next_shot < len(shots) and shots[next_shot].at_s < seg.start:
+        while next_shot < len(shots) and shots[next_shot].at_s < int(seg.start):
             lines.append(_screenshot_line(next_shot + 1, shots[next_shot]))
             next_shot += 1
         ts = format_timestamp(seg.start)

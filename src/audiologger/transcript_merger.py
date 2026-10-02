@@ -33,9 +33,12 @@ def render_markdown(
 ) -> str:
     """Render the final transcript Markdown matching the spec format.
 
-    Screenshots are placed among the speech lines by time; a speech line that
-    starts in the same second comes first. Without screenshots the output is
-    unchanged.
+    Screenshots are placed among the speech lines by time, compared in whole
+    seconds as the timestamps are shown; a speech line in the same second comes
+    first, and screenshots within one second keep the caller's order (the order
+    find_screenshots returns). `segments` must be in start order, as
+    merge_segments returns them. Without screenshots, no screenshot header or
+    lines are added.
     """
     duration_str = format_timestamp(duration_seconds)
     # Drop the leading "00:" for short recordings — keep it consistent: spec
@@ -58,7 +61,7 @@ def render_markdown(
     lines.extend(["", "---", ""])
     next_shot = 0
     for seg in segments:
-        while next_shot < len(shots) and shots[next_shot].at_s < seg.start:
+        while next_shot < len(shots) and shots[next_shot].at_s < int(seg.start):
             lines.append(_screenshot_line(next_shot + 1, shots[next_shot]))
             next_shot += 1
         ts = format_timestamp(seg.start)

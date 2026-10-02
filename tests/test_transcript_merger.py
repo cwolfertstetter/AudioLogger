@@ -140,3 +140,13 @@ def test_the_header_counts_the_screenshots():
     ])
 
     assert "**Model:** WhisperX large-v3\n**Screenshots:** 2\n" in md
+
+
+def test_speech_in_the_same_displayed_second_comes_first_even_mid_second():
+    """WhisperX starts are fractional; the tie rule works on whole seconds,
+    as the timestamps are displayed."""
+    md = render_markdown([Segment(751.4, 753.0, "Genau hier.", "Me")], **HEADER,
+                         screenshots=[Screenshot(751, "screenshots/screenshot_00-12-31.png")])
+
+    assert body(md)[0].startswith("**[00:12:31] Me:**")
+    assert body(md)[1].startswith("**[00:12:31] Screenshot 1:**")
