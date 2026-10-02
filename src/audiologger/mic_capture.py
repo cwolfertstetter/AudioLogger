@@ -14,9 +14,16 @@ It will not do the stereo->mono downmix, though: asking it for channels=1 on a
 buffer, stretching one second of audio into two and dropping everything an
 octave.  So the stream is opened at the device's own channel count and mixed
 down here.
+
+A microphone can also vanish mid-recording: on 2026-09-23 the Thunderbolt
+controller cycled its power state and briefly dropped every device behind it,
+and the mic thread gave up for the remaining four hours of a call.  A dropout
+now reopens the default microphone and pads the gap with silence, so the file
+stays on the wall-clock timeline the system track follows.
 """
 import logging
 import threading
+import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,10 +42,23 @@ class MicrophoneNotAvailable(Exception):
 
 
 @dataclass(frozen=True)
+class MicDropout:
+    """The microphone vanished mid-recording; the gap was filled with silence."""
+    at_s: float              # seconds into the recording
+    gap_s: float             # how long it was gone
+    resumed_on: str | None   # device recording continued on; None if it never came back
+
+
+@dataclass(frozen=True)
 class MicCaptureResult:
-    """Outcome of one capture run.  `frames` is 0 when the mic stayed silent."""
+    """Outcome of one capture run.
+
+    `frames` counts what the microphone actually delivered -- 0 when it stayed
+    silent -- not the silence padded into dropouts.
+    """
     device_name: str
     frames: int
+    dropouts: tuple[MicDropout, ...] = ()
 
 
 try:
@@ -84,28 +104,31 @@ def _default_input_device(pa: Any, pyaudio_mod: Any) -> dict:
     return info
 
 
-def record_microphone(
-    out_path: Path,
-    sample_rate: int,
-    stop_event: threading.Event,
-    *,
-    pa_factory: Callable[[], Any] | None = None,
-) -> MicCaptureResult:
-    """Record the default microphone to `out_path` (16-bit mono PCM).
+def _quietly(fn: Callable[[], Any]) -> None:
+    try:
+        fn()
+    except Exception:
+        log.debug("Ignoring error releasing a stream whose device is gone", exc_info=True)
 
-    PortAudio is asked for mono int16 at `sample_rate` directly; WASAPI shared
-    mode refuses rates the device does not run at, so `sample_rate` must match
-    the device (48000 for every current endpoint).
+
+def _release(pa: Any, stream: Any) -> None:
+    """Close a stream and its PortAudio.  After a dropout the device is already
+    gone and these calls raise too -- on 2026-09-23 it was exactly such a
+    cleanup error that killed the mic thread for good."""
+    if stream is not None:
+        _quietly(stream.stop_stream)
+        _quietly(stream.close)
+    if pa is not None:
+        _quietly(pa.terminate)
+
+
+def _open_default_stream(pa_factory: Callable[[], Any], pyaudio_mod: Any, sample_rate: int):
+    """Initialise PortAudio and open the default microphone.
+
+    A fresh PortAudio every time: it reads the device list only when it
+    initialises, so after a dropout an old instance would still point at the
+    vanished device.  Returns (pa, stream, device_info, channels).
     """
-    if pa_factory is None:
-        if not _HAS_PYAUDIOWPATCH:
-            raise MicrophoneNotAvailable(
-                "pyaudiowpatch is not installed — install with `uv pip install pyaudiowpatch`"
-            )
-        pa_factory = pyaudio.PyAudio
-
-    import pyaudiowpatch as pyaudio_mod  # constants; cheap, already imported
-
     pa = pa_factory()
     try:
         device = _default_input_device(pa, pyaudio_mod)
@@ -125,34 +148,126 @@ def record_microphone(
             input_device_index=device["index"],
         )
     except MicrophoneNotAvailable:
-        pa.terminate()
+        _quietly(pa.terminate)
         raise
     except Exception as e:
-        pa.terminate()
+        _quietly(pa.terminate)
         raise MicrophoneNotAvailable(f"Failed to open microphone stream: {e}") from e
+    return pa, stream, device, channels
 
-    frames = 0
+
+def _reconnect(
+    pa_factory: Callable[[], Any],
+    pyaudio_mod: Any,
+    sample_rate: int,
+    stop_event: threading.Event,
+    *,
+    settle_s: float,
+    retry_delay_s: float,
+):
+    """Reopen the default microphone, retrying until it is back or recording stops.
+
+    Waits `settle_s` first, so Windows can re-add a device that only blinked off
+    and make it the default again before we grab whatever stands in for it.
+    Returns what _open_default_stream returns, or None if recording ended first.
+    """
+    if stop_event.wait(settle_s):
+        return None
+    attempts = 0
+    while not stop_event.is_set():
+        attempts += 1
+        try:
+            opened = _open_default_stream(pa_factory, pyaudio_mod, sample_rate)
+        except MicrophoneNotAvailable as e:
+            if attempts == 1 or attempts % 30 == 0:
+                log.info("Microphone still unavailable (attempt %d): %s", attempts, e)
+            stop_event.wait(retry_delay_s)
+            continue
+        log.info("Microphone back after %d attempt(s): %r", attempts, opened[2].get("name"))
+        return opened
+    return None
+
+
+def record_microphone(
+    out_path: Path,
+    sample_rate: int,
+    stop_event: threading.Event,
+    *,
+    pa_factory: Callable[[], Any] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    settle_s: float = 2.0,
+    retry_delay_s: float = 1.0,
+) -> MicCaptureResult:
+    """Record the default microphone to `out_path` (16-bit mono PCM).
+
+    `sample_rate` must be one the device runs at -- WASAPI shared mode refuses
+    others (48000 for every current endpoint).  Raises MicrophoneNotAvailable if
+    no microphone can be opened at the start.  A dropout later on is survived:
+    the default microphone is reopened and the gap padded with silence.
+    """
+    if pa_factory is None:
+        if not _HAS_PYAUDIOWPATCH:
+            raise MicrophoneNotAvailable(
+                "pyaudiowpatch is not installed — install with `uv pip install pyaudiowpatch`"
+            )
+        pa_factory = pyaudio.PyAudio
+
+    import pyaudiowpatch as pyaudio_mod  # constants; cheap, already imported
+
+    pa, stream, device, channels = _open_default_stream(pa_factory, pyaudio_mod, sample_rate)
+    first_name = current_name = str(device.get("name") or "unknown")
+    start = clock()
+    written = 0    # samples in the file, padding included
+    captured = 0   # samples the microphone actually delivered
+    dropouts: list[MicDropout] = []
+
     try:
         with wave.open(str(out_path), "wb") as wav:
             wav.setnchannels(1)
             wav.setsampwidth(2)
             wav.setframerate(sample_rate)
+
+            def pad_to_now() -> None:
+                nonlocal written
+                missing = int(round((clock() - start) * sample_rate)) - written
+                if missing > 0:
+                    wav.writeframes(bytes(2 * missing))
+                    written += missing
+
             while not stop_event.is_set():
                 try:
                     data = stream.read(
                         sample_rate * CHUNK_SECONDS, exception_on_overflow=False
                     )
-                except Exception:
-                    log.exception("Microphone read failed")
-                    break
+                except Exception as e:
+                    lost_at = clock()
+                    log.warning(
+                        "Microphone %r dropped out %.0f s in (%s) -- reconnecting",
+                        current_name, lost_at - start, e,
+                    )
+                    _release(pa, stream)
+                    pa = stream = None
+                    opened = _reconnect(
+                        pa_factory, pyaudio_mod, sample_rate, stop_event,
+                        settle_s=settle_s, retry_delay_s=retry_delay_s,
+                    )
+                    if opened is not None:
+                        pa, stream, device, channels = opened
+                        current_name = str(device.get("name") or "unknown")
+                    pad_to_now()
+                    dropouts.append(MicDropout(
+                        at_s=lost_at - start,
+                        gap_s=clock() - lost_at,
+                        resumed_on=current_name if opened is not None else None,
+                    ))
+                    if opened is None:
+                        break
+                    continue
                 mono = _to_mono(data, channels)
                 wav.writeframes(mono)
-                frames += len(mono) // 2
+                written += len(mono) // 2
+                captured += len(mono) // 2
     finally:
-        try:
-            stream.stop_stream()
-            stream.close()
-        finally:
-            pa.terminate()
+        _release(pa, stream)
 
-    return MicCaptureResult(str(device.get("name") or "unknown"), frames)
+    return MicCaptureResult(first_name, captured, tuple(dropouts))

@@ -69,3 +69,59 @@ def test_warns_when_capture_crashes_unexpectedly(tmp_path, monkeypatch):
     cap._run_mic(tmp_path / "mic.wav")
 
     assert any("aborted" in w.lower() for w in cap.warnings), cap.warnings
+
+
+# --- dropouts --------------------------------------------------------------------
+# A mic that vanished and came back must still be visible to the user: the
+# warning reaches capture_warnings.txt and the toast shown at stop.
+
+def test_warns_when_the_microphone_dropped_out_and_came_back(tmp_path, monkeypatch):
+    from audiologger.mic_capture import MicDropout
+
+    monkeypatch.setattr(
+        audio_capture, "record_microphone",
+        lambda *a, **k: MicCaptureResult(
+            "Microphone (KLIM Mantis Audio 7.1)", 48000,
+            (MicDropout(at_s=752.0, gap_s=6.0, resumed_on="Microphone (KLIM Mantis Audio 7.1)"),),
+        ),
+    )
+    cap = make_capture(tmp_path)
+
+    cap._run_mic(tmp_path / "mic.wav")
+
+    [w] = cap.warnings
+    assert "dropped out" in w and "12:32" in w and "6 s" in w and "silence" in w
+
+
+def test_names_the_device_recording_continued_on_when_it_changed(tmp_path, monkeypatch):
+    from audiologger.mic_capture import MicDropout
+
+    monkeypatch.setattr(
+        audio_capture, "record_microphone",
+        lambda *a, **k: MicCaptureResult(
+            "Microphone (KLIM Mantis Audio 7.1)", 48000,
+            (MicDropout(at_s=60.0, gap_s=3.0, resumed_on="Microphone Array (Realtek(R) Audio)"),),
+        ),
+    )
+    cap = make_capture(tmp_path)
+
+    cap._run_mic(tmp_path / "mic.wav")
+
+    assert "Microphone Array (Realtek(R) Audio)" in cap.warnings[0]
+
+
+def test_says_so_when_the_microphone_never_came_back(tmp_path, monkeypatch):
+    from audiologger.mic_capture import MicDropout
+
+    monkeypatch.setattr(
+        audio_capture, "record_microphone",
+        lambda *a, **k: MicCaptureResult(
+            "Microphone (KLIM Mantis Audio 7.1)", 48000,
+            (MicDropout(at_s=793.0, gap_s=14826.0, resumed_on=None),),
+        ),
+    )
+    cap = make_capture(tmp_path)
+
+    cap._run_mic(tmp_path / "mic.wav")
+
+    assert "did not come back" in cap.warnings[0]

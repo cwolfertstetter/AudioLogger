@@ -9,6 +9,7 @@ import soundcard as sc
 
 from audiologger.audio_mix import loopback_part_name, mix_loopback_parts
 from audiologger.mic_capture import (
+    MicCaptureResult,
     MicrophoneNotAvailable,
     record_microphone,
 )
@@ -21,6 +22,35 @@ from audiologger.process_loopback import (
 log = logging.getLogger(__name__)
 
 CHUNK_SECONDS = 1
+
+
+def _clock(seconds: float) -> str:
+    """Position in the recording as m:ss, or h:mm:ss past the hour."""
+    s = int(round(seconds))
+    h, rest = divmod(s, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _duration(seconds: float) -> str:
+    return f"{round(seconds)} s" if seconds < 120 else _clock(seconds)
+
+
+def _describe_dropouts(result: MicCaptureResult) -> str:
+    drops = result.dropouts
+    if len(drops) == 1:
+        text = (f"Microphone dropped out at {_clock(drops[0].at_s)} for "
+                f"{_duration(drops[0].gap_s)}; the gap was filled with silence.")
+    else:
+        total = sum(d.gap_s for d in drops)
+        text = (f"Microphone dropped out {len(drops)}× (first at {_clock(drops[0].at_s)}, "
+                f"{_duration(total)} in total); the gaps were filled with silence.")
+    last = drops[-1].resumed_on
+    if last is None:
+        text += " It did not come back before the recording ended."
+    elif last != result.device_name:
+        text += f" Recording continued on {last!r}."
+    return text
 
 
 def _to_int16(data: np.ndarray) -> np.ndarray:
@@ -153,6 +183,8 @@ class AudioCaptureThread:
             return
 
         self.mic_device_name = result.device_name
+        if result.dropouts:
+            self.warnings.append(_describe_dropouts(result))
         if result.frames == 0:
             log.warning("Microphone %r produced no audio", result.device_name)
             self.warnings.append(
