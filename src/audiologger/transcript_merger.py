@@ -39,6 +39,9 @@ def render_markdown(
     find_screenshots returns). `segments` must be in start order, as
     merge_segments returns them. Without screenshots, no screenshot header or
     lines are added.
+
+    Every line is a paragraph of its own: Markdown joins lines that no blank
+    line separates, so a preview showed the whole conversation as one block.
     """
     duration_str = format_timestamp(duration_seconds)
     # Drop the leading "00:" for short recordings — keep it consistent: spec
@@ -49,7 +52,6 @@ def render_markdown(
     shots = sorted(screenshots, key=lambda s: s.at_s)
     lines = [
         f"# Recording {recorded_at}",
-        "",
         f"**Duration:** {duration_str}",
         f"**Source:** {source_label}",
         f"**Model:** {model_label}",
@@ -58,7 +60,7 @@ def render_markdown(
         lines.append(f"**Screenshots:** {len(shots)}")
     for w in warnings:
         lines.append(f"**Warning:** {w}")
-    lines.extend(["", "---", ""])
+    lines.append("---")
     next_shot = 0
     for seg in segments:
         while next_shot < len(shots) and shots[next_shot].at_s < int(seg.start):
@@ -68,7 +70,7 @@ def render_markdown(
         lines.append(f"**[{ts}] {seg.speaker}:** {seg.text}")
     for i in range(next_shot, len(shots)):
         lines.append(_screenshot_line(i + 1, shots[i]))
-    return "\n".join(lines) + "\n"
+    return "\n\n".join(lines) + "\n"
 
 
 def _screenshot_line(number: int, shot: Screenshot) -> str:

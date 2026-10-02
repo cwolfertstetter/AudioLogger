@@ -95,7 +95,9 @@ Rejected alternatives:
 
   ```
   **[00:12:28] Speaker 1:** Hier seht ihr die neue Rezeptstruktur.
+
   **[00:12:31] Screenshot 3:** ![Screenshot 3](screenshots/screenshot_00-12-31.png)
+
   **[00:12:35] Me:** Okay, und wo kommt der Teig rein?
   ```
 
@@ -111,7 +113,11 @@ Rejected alternatives:
 - `transcript.json` gains
   `"screenshots": [{"at_s": 751, "path": "screenshots/screenshot_00-12-31.png"}]`
   (an empty list without screenshots).
-- **Without screenshots, `transcript.md` is byte-for-byte what it is today.**
+- **Without screenshots, `transcript.md` gains no screenshot header or lines.**
+  It was byte-for-byte unchanged when this shipped; right after, every line of
+  the transcript (header fields included) became a paragraph of its own,
+  separated by a blank line, because Markdown previews joined consecutive lines
+  into one block — far more noticeable once images sat among them.
 
 ## Components
 

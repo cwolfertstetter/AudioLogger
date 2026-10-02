@@ -84,22 +84,36 @@ SPEECH = [
 
 
 def body(md: str) -> list[str]:
-    return md.split("---\n\n", 1)[1].splitlines()
+    return [line for line in md.split("---\n\n", 1)[1].splitlines() if line]
 
 
-def test_without_screenshots_the_transcript_is_exactly_as_before():
+def test_every_line_is_a_paragraph_of_its_own():
+    """Markdown joins lines that no blank line separates: without one, a preview
+    showed the whole conversation, and the header fields, as one paragraph."""
     assert render_markdown(SPEECH, **HEADER) == (
         "# Recording 2026-10-02 10:00:00\n"
         "\n"
         "**Duration:** 15:00\n"
+        "\n"
         "**Source:** mic + system (loopback)\n"
+        "\n"
         "**Model:** WhisperX large-v3\n"
         "\n"
         "---\n"
         "\n"
         "**[00:12:28] Speaker 1:** Hier seht ihr die neue Rezeptstruktur.\n"
+        "\n"
         "**[00:12:35] Me:** Okay, und wo kommt der Teig rein?\n"
     )
+
+
+def test_screenshot_lines_and_warnings_are_paragraphs_too():
+    md = render_markdown(SPEECH, **{**HEADER, "warnings": ["Mic dropped out."]},
+                         screenshots=[Screenshot(751, "screenshots/screenshot_00-12-31.png")])
+
+    assert "**Model:** WhisperX large-v3\n\n**Screenshots:** 1\n\n**Warning:** Mic dropped out.\n\n---\n" in md
+    assert ("Rezeptstruktur.\n\n**[00:12:31] Screenshot 1:** "
+            "![Screenshot 1](screenshots/screenshot_00-12-31.png)\n\n**[00:12:35] Me:**") in md
 
 
 def test_a_screenshot_sits_between_the_speech_lines_around_it():
@@ -139,7 +153,7 @@ def test_the_header_counts_the_screenshots():
         Screenshot(800, "screenshots/screenshot_00-13-20.png"),
     ])
 
-    assert "**Model:** WhisperX large-v3\n**Screenshots:** 2\n" in md
+    assert "**Model:** WhisperX large-v3\n\n**Screenshots:** 2\n" in md
 
 
 def test_speech_in_the_same_displayed_second_comes_first_even_mid_second():
