@@ -12,7 +12,7 @@ import pystray
 from pystray import MenuItem, Menu
 
 from audiologger.audio_capture import AudioCaptureThread
-from audiologger.audio_mix import mix_to_file
+from audiologger.audio_mix import mix_loopback_parts, mix_to_file
 from audiologger.config import Config, load_config, save_config
 from audiologger.controller import RecordingController, RecordingState
 from audiologger.hotkey import HotkeyManager
@@ -88,6 +88,12 @@ class TrayApp:
         for sess in find_orphaned_sessions(self.cfg.output_dir):
             log.info("Found orphaned session %s — enqueuing", sess.name)
             (sess / "RECORDING_IN_PROGRESS").unlink(missing_ok=True)
+            # A crash mid-call leaves one part per output device and no
+            # system.wav yet; stop() never ran to merge them.
+            try:
+                mix_loopback_parts(sess)
+            except Exception:
+                log.exception("Could not merge loopback parts of %s", sess.name)
             try:
                 mix_to_file(sess / "mic.wav", sess / "system.wav", sess / "mixed.wav")
             except FileNotFoundError:

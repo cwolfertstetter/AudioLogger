@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import soundcard as sc
 
+from audiologger.audio_mix import loopback_part_name, mix_loopback_parts
 from audiologger.mic_capture import (
     MicrophoneNotAvailable,
     record_microphone,
@@ -22,8 +23,58 @@ log = logging.getLogger(__name__)
 CHUNK_SECONDS = 1
 
 
+def _to_int16(data: np.ndarray) -> np.ndarray:
+    """soundcard delivers float32 shaped (N, channels); keep channel 0 as int16."""
+    mono = data[:, 0] if data.ndim == 2 else data
+    return (np.clip(mono, -1.0, 1.0) * 32767).astype(np.int16)
+
+
+class LoopbackPartWriter:
+    """Writes one output device's loopback into a part file.
+
+    Every output device is looped back during a recording and most of them stay
+    silent throughout, so the file is only created once the device first makes
+    a sound.  Its start position goes into the file name (see
+    audio_mix.loopback_part_name) so the parts can be laid back onto one
+    timeline -- by stop(), or by crash recovery if the machine dies mid-call.
+    """
+
+    def __init__(self, session_dir: Path, index: int, sample_rate: int):
+        self._dir = session_dir
+        self._index = index
+        self._sr = sample_rate
+        self._samples_seen = 0
+        self._wav: wave.Wave_write | None = None
+        self.path: Path | None = None
+        self.failed = False
+
+    def write(self, samples: np.ndarray) -> None:
+        if self._wav is None:
+            if not samples.any():
+                self._samples_seen += len(samples)
+                return
+            self.path = self._dir / loopback_part_name(self._index, self._samples_seen)
+            self._wav = wave.open(str(self.path), "wb")
+            self._wav.setnchannels(1)
+            self._wav.setsampwidth(2)
+            self._wav.setframerate(self._sr)
+        self._wav.writeframes(samples.astype(np.int16).tobytes())
+        self._samples_seen += len(samples)
+
+    def close(self) -> None:
+        if self._wav is not None:
+            self._wav.close()
+            self._wav = None
+
+
 class AudioCaptureThread:
-    """Two-stream recorder: mic + system loopback (or per-app loopback)."""
+    """Records the mic plus system audio.
+
+    System audio is the loopback of *every* output device, mixed: a call app
+    picks its own device, and looping back only the Windows default recorded
+    twenty minutes of silence on 2026-09-28 while the call played on a headset.
+    In "apps" mode the selected processes are captured instead.
+    """
 
     def __init__(
         self,
@@ -40,6 +91,7 @@ class AudioCaptureThread:
         self._mic_only = mic_only
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._loopbacks: list[tuple[str, LoopbackPartWriter]] = []
         self.warnings: list[str] = []
         # Recorded for transcript header
         self.mic_device_name: str | None = None
@@ -56,17 +108,23 @@ class AudioCaptureThread:
         t_mic.start()
         self._threads = [t_mic]
 
-        if not self._mic_only:
+        if self._mic_only:
+            return
+        if self._audio_source == "apps":
             t_sys = threading.Thread(
                 target=self._run_system, args=(sys_path,), name="audio-sys", daemon=True
             )
             t_sys.start()
             self._threads.append(t_sys)
+        else:
+            self._start_device_loopbacks()
 
     def stop(self) -> None:
         self._stop.set()
         for t in self._threads:
             t.join(timeout=10)
+        if self._loopbacks:
+            self._finish_device_loopbacks()
 
     # --- internal ---
 
@@ -102,7 +160,66 @@ class AudioCaptureThread:
                 "the right device is selected in Windows and is not muted."
             )
 
+    def _start_device_loopbacks(self) -> None:
+        try:
+            speakers = list(sc.all_speakers())
+        except Exception as e:
+            log.warning("Cannot list output devices: %s", e)
+            self.warnings.append("System audio (loopback) not available.")
+            return
+        if not speakers:
+            log.warning("No output devices to loop back")
+            self.warnings.append("System audio (loopback) not available.")
+            return
+        for i, speaker in enumerate(speakers):
+            writer = LoopbackPartWriter(self._session_dir, i, self._sr)
+            self._loopbacks.append((speaker.name, writer))
+            t = threading.Thread(
+                target=self._run_device_loopback,
+                args=(speaker, writer),
+                name=f"audio-loopback-{i}",
+                daemon=True,
+            )
+            t.start()
+            self._threads.append(t)
+
+    def _run_device_loopback(self, speaker, writer: LoopbackPartWriter) -> None:
+        try:
+            loopback = sc.get_microphone(id=str(speaker.id), include_loopback=True)
+            with loopback.recorder(samplerate=self._sr, channels=[0]) as rec:
+                while not self._stop.is_set():
+                    writer.write(_to_int16(rec.record(numframes=self._sr * CHUNK_SECONDS)))
+        except Exception:
+            # One device failing -- an unsupported format, or a headset dropping
+            # off the bus -- must not take the others down with it.
+            log.exception("Loopback of %r failed", speaker.name)
+            writer.failed = True
+        finally:
+            writer.close()
+
+    def _finish_device_loopbacks(self) -> None:
+        contributed = [name for name, w in self._loopbacks if w.path is not None]
+        try:
+            mixed = mix_loopback_parts(self._session_dir)
+        except Exception:
+            log.exception("Mixing the loopback parts failed")
+            self.warnings.append(
+                "System audio could not be mixed; the per-device parts were kept."
+            )
+            return
+        self.system_device_name = ", ".join(contributed) or None
+        log.info("System audio captured from: %s", self.system_device_name or "no device")
+        if mixed is None:
+            if all(w.failed for _, w in self._loopbacks):
+                self.warnings.append("System audio (loopback) not available.")
+            else:
+                self.warnings.append(
+                    "No system audio was captured from any output device — "
+                    "if this was a call, the other side is missing."
+                )
+
     def _run_system(self, out_path: Path) -> None:
+        """Per-app capture ("apps" mode), falling back to the default speaker."""
         if self._audio_source == "apps":
             try:
                 record_app_loopback(out_path, self._app_names, self._sr, self._stop)
@@ -134,7 +251,4 @@ class AudioCaptureThread:
 
     def _write_chunk(self, wav: wave.Wave_write, data: np.ndarray) -> None:
         """data is float32 from soundcard, shape (N, 1). Convert to int16."""
-        mono = data[:, 0] if data.ndim == 2 else data
-        clipped = np.clip(mono, -1.0, 1.0)
-        i16 = (clipped * 32767).astype(np.int16)
-        wav.writeframes(i16.tobytes())
+        wav.writeframes(_to_int16(data).tobytes())
