@@ -222,8 +222,15 @@ class ClipboardScreenshotWatcher:
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
+        if self._thread is None:
+            return      # never started: nothing was recorded, the clipboard stays untouched
+        self._thread.join(timeout=2)
+        if self._thread.is_alive():
+            return      # still inside a poll; a second one here would race it
+        # The thread polls every 0.25 s, so a snip taken in the last fraction of
+        # a second before the recording stops is still unread. Look once more.
+        # poll_once() logs and swallows every error itself, so this cannot raise.
+        self.poll_once()
 
     def poll_once(self) -> None:
         try:

@@ -305,6 +305,53 @@ def test_stop_without_start_is_harmless(tmp_path):
     ClipboardScreenshotWatcher(tmp_path, clipboard=FakeClipboard()).stop()
 
 
+def test_a_snip_taken_just_before_stop_is_not_lost(watch):
+    """The thread polls every 0.25 s; a snip in the last fraction of a second
+    would otherwise vanish. With poll_s=3600 the thread never polls by itself
+    (it waits before polling), so only stop()'s final poll can save this one."""
+    watch.w.start()
+    watch.clock.now += 42
+    watch.clip.put(image())
+
+    watch.w.stop()
+
+    assert files(watch.dir) == ["screenshot_00-00-42.png"]
+    assert len(watch.saved) == 1
+
+
+def test_stop_without_start_does_not_poll(tmp_path):
+    """Nothing was recorded, so there is nothing to catch up on -- and the
+    clipboard must not be read at all."""
+
+    class Spy(FakeClipboard):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def sequence_number(self) -> int:
+            self.calls += 1
+            return super().sequence_number()
+
+    clip = Spy()
+    w = ClipboardScreenshotWatcher(tmp_path, clipboard=clip)
+    clip.put(image())
+
+    w.stop()
+
+    assert clip.calls == 0
+    assert files(tmp_path / "screenshots") == []
+
+
+def test_stopping_twice_saves_the_last_snip_once(watch):
+    watch.w.start()
+    watch.clip.put(image())
+
+    watch.w.stop()
+    watch.w.stop()
+
+    assert len(files(watch.dir)) == 1
+
+
 def test_a_watcher_is_single_use(watch):
     watch.w.start()
     with pytest.raises(RuntimeError):
