@@ -13,7 +13,7 @@ from pystray import MenuItem, Menu
 
 from audiologger.audio_capture import AudioCaptureThread
 from audiologger.audio_mix import mix_loopback_parts, mix_to_file
-from audiologger.config import Config, load_config, save_config
+from audiologger.config import Config, load_config_checked, save_config
 from audiologger.controller import RecordingController, RecordingState
 from audiologger.hotkey import HotkeyManager
 from audiologger.icons import idle_icon, recording_icon, transcribing_icon
@@ -32,8 +32,15 @@ class TrayApp:
     LONG_RECORDING_WARN_SECONDS = 3 * 60 * 60  # 3 hours
 
     def __init__(self):
-        self.cfg: Config = load_config(config_path())
+        self.cfg: Config
+        self.cfg, config_problem = load_config_checked(config_path())
         self.notifier = Notifier(enabled=self.cfg.notification_enabled)
+        if config_problem:
+            # Shown even with notifications off: otherwise nothing would tell.
+            try:
+                Notifier(enabled=True).notify("Config file unusable", config_problem)
+            except Exception:
+                log.exception("Could not show the config warning")
         self.state_dir = appdata_dir() / "worker_state"
         self.queue = TranscriptionJobQueue(state_dir=self.state_dir)
         self.controller = RecordingController(
@@ -57,6 +64,8 @@ class TrayApp:
         if self.cfg.worker_prewarm:
             log.info("Pre-warming transcription worker")
             self.queue.prewarm()
+        # Jobs a worker killed mid-job (quit, model change) left behind.
+        self.queue.resume()
         self._bind_hotkeys()
         self.icon = pystray.Icon(
             "AudioLogger",
@@ -90,18 +99,27 @@ class TrayApp:
     def _handle_orphaned_sessions(self) -> None:
         for sess in find_orphaned_sessions(self.cfg.output_dir):
             log.info("Found orphaned session %s — enqueuing", sess.name)
-            (sess / "RECORDING_IN_PROGRESS").unlink(missing_ok=True)
             # A crash mid-call leaves one part per output device and no
             # system.wav yet; stop() never ran to merge them.
             try:
                 mix_loopback_parts(sess)
             except Exception:
                 log.exception("Could not merge loopback parts of %s", sess.name)
+            # mixed.wav is only a convenience copy; whatever goes wrong here
+            # must neither stop the app from starting nor lose the session.
             try:
                 mix_to_file(sess / "mic.wav", sess / "system.wav", sess / "mixed.wav")
             except FileNotFoundError:
                 log.warning("Orphan %s has no audio, skipping mix", sess.name)
-            self.queue.enqueue(sess)
+            except Exception:
+                log.exception("Could not mix %s", sess.name)
+            try:
+                self.queue.enqueue(sess)
+            except Exception:
+                # Keep the marker: the next start tries again.
+                log.exception("Could not enqueue orphan %s", sess.name)
+                continue
+            (sess / "RECORDING_IN_PROGRESS").unlink(missing_ok=True)
 
     # --- Hotkey + controller -------------------------------------------
 
@@ -163,15 +181,16 @@ class TrayApp:
         """Mutate cfg.field, save, terminate worker so it reloads on next job."""
         setattr(self.cfg, field, value)
         save_config(config_path(), self.cfg)
-        # Terminate running worker — it will be respawned with the new model on next job.
-        worker = getattr(self.queue, "_worker", None)
-        if worker is not None and worker.poll() is None:
-            try:
-                worker.terminate()
-                worker.wait(timeout=5)
-            except Exception:
-                log.exception("Failed to terminate worker after model change")
-            self.queue._worker = None
+        # Terminate running worker so the next one loads the new model.  A job
+        # it was in the middle of is still queued: restart on it right away.
+        try:
+            self.queue.stop_worker()
+        except Exception:
+            log.exception("Failed to terminate worker after model change")
+        try:
+            self.queue.resume()
+        except Exception:
+            log.exception("Failed to restart worker after model change")
         self.notifier.notify(
             "Model changed",
             f"Whisper model set to {value}. Worker will reload on next job.",
@@ -455,13 +474,11 @@ class TrayApp:
         self.dictation_hotkey.unbind()
         self.extend_hotkey.unbind()
         self._stop_event.set()
-        worker = getattr(self.queue, "_worker", None)
-        if worker is not None and worker.poll() is None:
-            try:
-                worker.terminate()
-                worker.wait(timeout=5)
-            except Exception:
-                log.exception("Failed to terminate worker cleanly")
+        # A job cut off here stays queued; run() resumes it on the next start.
+        try:
+            self.queue.stop_worker()
+        except Exception:
+            log.exception("Failed to terminate worker cleanly")
         if self.icon is not None:
             self.icon.stop()
 
@@ -475,6 +492,8 @@ class TrayApp:
             last_finished.get("session_id"),
             last_finished.get("success"),
             last_finished.get("was_extend"),
+            # Tells two runs of the same session apart (re-transcription).
+            last_finished.get("finished_at"),
         )
 
     def _status_refresh_loop(self) -> None:
@@ -509,15 +528,14 @@ class TrayApp:
                 else:
                     self._set_icon(idle_icon())
 
-                # Detect new completion via last_finished change.
+                # Detect new completion via last_finished change.  A freshly
+                # spawned worker reports last_finished=None until its first job
+                # ends; that is "nothing new", not a reset -- remembering None
+                # here swallowed the toast for every worker's first job.
                 current_key = self._finished_key(s.last_finished)
-                if (
-                    s.last_finished is not None
-                    and prev_finished_key is not None
-                    and current_key != prev_finished_key
-                ):
+                if current_key is not None and current_key != prev_finished_key:
                     self._handle_completion(s.last_finished)
-                prev_finished_key = current_key
+                    prev_finished_key = current_key
             time.sleep(1.0)
 
     def _handle_completion(self, payload: dict) -> None:
@@ -773,9 +791,46 @@ def _setup_tray_logging() -> Path:
     return log_path
 
 
+_instance_mutex = None  # held for the life of the process
+
+
+def _acquire_single_instance() -> bool:
+    """False if another AudioLogger tray already runs in this Windows session.
+
+    A second instance would treat the first one's live recording as crashed:
+    drop its marker, mix its half-written parts and queue it -- and bind the
+    same hotkeys a second time.
+    """
+    global _instance_mutex
+    if sys.platform != "win32":
+        return True
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    handle = kernel32.CreateMutexW(None, False, "Local\\AudioLogger.Tray")
+    if not handle:
+        log.warning("Single-instance check failed (error %s); starting anyway",
+                    ctypes.get_last_error())
+        return True
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+        return False
+    _instance_mutex = handle
+    return True
+
+
 def main() -> None:
     log_path = _setup_tray_logging()
     log.info("AudioLogger tray starting — log: %s", log_path)
+    if not _acquire_single_instance():
+        log.info("AudioLogger is already running; exiting")
+        try:
+            Notifier(enabled=True).notify(
+                "AudioLogger is already running", "Use the icon in the system tray."
+            )
+        except Exception:
+            log.exception("Could not show the already-running toast")
+        return
     try:
         TrayApp().run()
     except Exception:

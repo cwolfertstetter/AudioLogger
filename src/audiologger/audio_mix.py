@@ -1,9 +1,12 @@
 """Mix two 16-bit PCM mono WAV files into one, padding the shorter one."""
+import logging
 import re
 import wave
 from pathlib import Path
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 # One part file per output device, created only once that device first makes a
 # sound.  The start position in samples is part of the name so the parts can be
@@ -73,7 +76,12 @@ def mix_loopback_parts(
             r.close()
 
     for _, p in parts:
-        p.unlink()
+        try:
+            p.unlink()
+        except OSError:
+            # Still held open by a capture thread that outlived stop()'s wait;
+            # system.wav is complete, so a leftover part costs nothing.
+            log.warning("Could not delete %s", p.name, exc_info=True)
     return out_path
 
 
@@ -106,11 +114,11 @@ def write_int16(path: Path, samples: np.ndarray, sr: int) -> None:
 _write_int16 = write_int16
 
 
-def append_wav(target: Path, addition: Path) -> None:
-    """Concatenate *addition* onto *target* in-place (both must be 16-bit mono).
+def append_wav(target: Path, addition: Path, out_path: Path | None = None) -> None:
+    """Concatenate *addition* onto *target* (both must be 16-bit mono).
 
-    Reads both files, concatenates their samples, and writes the result back to
-    *target*.  Raises ValueError if sample rates differ.
+    Writes the result to *out_path*, or back over *target* when omitted.
+    Raises ValueError if sample rates differ.
     """
     target_samples, sr_target = read_int16(target)
     addition_samples, sr_addition = read_int16(addition)
@@ -119,40 +127,69 @@ def append_wav(target: Path, addition: Path) -> None:
             f"sample rates differ: target={sr_target}, addition={sr_addition}"
         )
     concatenated = np.concatenate([target_samples, addition_samples])
-    write_int16(target, concatenated, sr_target)
+    write_int16(out_path if out_path is not None else target, concatenated, sr_target)
 
 
-def mix_to_file(mic_path: Path, system_path: Path, out_path: Path) -> None:
+def _open_track(path: Path) -> wave.Wave_read | None:
+    """Open a 16-bit mono WAV for mixing; None if it is missing or empty.
+
+    A crash in the first second of a recording leaves a 0-byte file: `wave`
+    writes the header with the first frames.  That track simply has no audio.
+    """
+    if not path.exists():
+        return None
+    try:
+        r = wave.open(str(path), "rb")
+    except EOFError:
+        return None
+    if r.getsampwidth() != 2 or r.getnchannels() != 1:
+        r.close()
+        raise ValueError(f"{path.name}: expected 16-bit mono")
+    return r
+
+
+def mix_to_file(
+    mic_path: Path,
+    system_path: Path,
+    out_path: Path,
+    *,
+    block_frames: int = 48000 * 10,
+) -> None:
     """Sum-mix mic + system to `out_path`.
 
-    - If both files exist: pad shorter with zeros, sum, clip to int16.
-    - If one file exists: copy it to out_path.
-    - If neither exists: FileNotFoundError.
+    - If both files have audio: pad shorter with zeros, sum, clip to int16.
+    - If one has: copy it to out_path.
+    - If neither has: FileNotFoundError.
+
+    Works block by block: a four-hour call would otherwise need over 10 GB.
     """
-    mic_exists = mic_path.exists()
-    sys_exists = system_path.exists()
-    if not mic_exists and not sys_exists:
-        raise FileNotFoundError(f"Neither {mic_path} nor {system_path} exists")
+    readers = []
+    try:
+        for p in (mic_path, system_path):
+            r = _open_track(p)
+            if r is not None:
+                readers.append(r)
+        if not readers:
+            raise FileNotFoundError(f"Neither {mic_path} nor {system_path} has audio")
+        rate = readers[0].getframerate()
+        for r in readers[1:]:
+            if r.getframerate() != rate:
+                raise ValueError(f"sample rates differ: mic={rate}, sys={r.getframerate()}")
 
-    if not mic_exists:
-        data, sr = _read_int16(system_path)
-        _write_int16(out_path, data, sr)
-        return
-    if not sys_exists:
-        data, sr = _read_int16(mic_path)
-        _write_int16(out_path, data, sr)
-        return
-
-    mic, sr_mic = _read_int16(mic_path)
-    sys_, sr_sys = _read_int16(system_path)
-    if sr_mic != sr_sys:
-        raise ValueError(f"sample rates differ: mic={sr_mic}, sys={sr_sys}")
-
-    n = max(len(mic), len(sys_))
-    mic_padded = np.zeros(n, dtype=np.int32)
-    sys_padded = np.zeros(n, dtype=np.int32)
-    mic_padded[: len(mic)] = mic
-    sys_padded[: len(sys_)] = sys_
-    summed = mic_padded + sys_padded
-    clipped = np.clip(summed, -32768, 32767).astype(np.int16)
-    _write_int16(out_path, clipped, sr_mic)
+        total = max(r.getnframes() for r in readers)
+        with wave.open(str(out_path), "wb") as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(rate)
+            pos = 0
+            while pos < total:
+                n = min(block_frames, total - pos)
+                acc = np.zeros(n, dtype=np.int32)
+                for r in readers:
+                    chunk = np.frombuffer(r.readframes(n), dtype=np.int16)
+                    acc[: len(chunk)] += chunk
+                out.writeframes(np.clip(acc, -32768, 32767).astype(np.int16).tobytes())
+                pos += n
+    finally:
+        for r in readers:
+            r.close()

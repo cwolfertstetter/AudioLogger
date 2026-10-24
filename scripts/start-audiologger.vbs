@@ -17,7 +17,7 @@ pythonw = projectRoot & "\.venv\Scripts\pythonw.exe"
 
 If Not fso.FileExists(pythonw) Then
     MsgBox "AudioLogger venv not found at:" & vbCrLf & pythonw & vbCrLf & vbCrLf & _
-           "Run 'uv venv' and 'uv pip install -e \"" & ".[gpu,dev]\"' in the project root first.", _
+           "Run 'uv venv' and 'uv pip install -e "".[gpu,dev]""' in the project root first.", _
            vbCritical, "AudioLogger"
     WScript.Quit 1
 End If

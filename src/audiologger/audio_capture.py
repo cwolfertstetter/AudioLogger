@@ -1,6 +1,7 @@
 """Records mic + system audio to separate WAV files in parallel."""
 import logging
 import threading
+import time
 import wave
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from audiologger.mic_capture import (
     record_microphone,
 )
 from audiologger.process_loopback import (
+    ProcessLoopbackAborted,
     ProcessLoopbackNotAvailable,
     record_app_loopback,
 )
@@ -22,6 +24,10 @@ from audiologger.process_loopback import (
 log = logging.getLogger(__name__)
 
 CHUNK_SECONDS = 1
+# How often a device that dropped out mid-recording is tried again, and how
+# often the list of output devices is checked for one plugged in meanwhile.
+RECONNECT_SECONDS = 2
+DEVICE_POLL_SECONDS = 5
 
 
 def _clock(seconds: float) -> str:
@@ -69,14 +75,21 @@ class LoopbackPartWriter:
     timeline -- by stop(), or by crash recovery if the machine dies mid-call.
     """
 
-    def __init__(self, session_dir: Path, index: int, sample_rate: int):
+    def __init__(self, session_dir: Path, index: int, sample_rate: int, start_at: int = 0):
         self._dir = session_dir
         self._index = index
         self._sr = sample_rate
-        self._samples_seen = 0
+        self._samples_seen = start_at
         self._wav: wave.Wave_write | None = None
         self.path: Path | None = None
         self.failed = False
+        # (dropped at, back at or None) in seconds into the recording
+        self.dropouts: list[tuple[float, float | None]] = []
+
+    def resume_at(self, position: int) -> None:
+        """Carry on after a gap: later sound goes into a new part at `position`."""
+        self.close()
+        self._samples_seen = max(position, self._samples_seen)
 
     def write(self, samples: np.ndarray) -> None:
         if self._wav is None:
@@ -122,6 +135,9 @@ class AudioCaptureThread:
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._loopbacks: list[tuple[str, LoopbackPartWriter]] = []
+        self._known_speakers: set[str] = set()
+        self._watch_thread: threading.Thread | None = None
+        self._started_at = 0.0
         self.warnings: list[str] = []
         # Recorded for transcript header
         self.mic_device_name: str | None = None
@@ -131,6 +147,7 @@ class AudioCaptureThread:
         mic_path = self._session_dir / "mic.wav"
         sys_path = self._session_dir / "system.wav"
         self._stop.clear()
+        self._started_at = time.monotonic()
 
         t_mic = threading.Thread(
             target=self._run_mic, args=(mic_path,), name="audio-mic", daemon=True
@@ -151,6 +168,9 @@ class AudioCaptureThread:
 
     def stop(self) -> None:
         self._stop.set()
+        # The device watch adds threads; once it has ended the list is final.
+        if self._watch_thread is not None:
+            self._watch_thread.join(timeout=10)
         for t in self._threads:
             t.join(timeout=10)
         if self._loopbacks:
@@ -203,29 +223,72 @@ class AudioCaptureThread:
             log.warning("No output devices to loop back")
             self.warnings.append("System audio (loopback) not available.")
             return
-        for i, speaker in enumerate(speakers):
-            writer = LoopbackPartWriter(self._session_dir, i, self._sr)
-            self._loopbacks.append((speaker.name, writer))
-            t = threading.Thread(
-                target=self._run_device_loopback,
-                args=(speaker, writer),
-                name=f"audio-loopback-{i}",
-                daemon=True,
-            )
-            t.start()
-            self._threads.append(t)
+        for speaker in speakers:
+            self._start_device_loopback(speaker, start_at=0)
+        self._watch_thread = threading.Thread(
+            target=self._watch_devices, name="audio-loopback-watch", daemon=True
+        )
+        self._watch_thread.start()
+
+    def _start_device_loopback(self, speaker, start_at: int) -> None:
+        i = len(self._loopbacks)
+        self._known_speakers.add(str(speaker.id))
+        writer = LoopbackPartWriter(self._session_dir, i, self._sr, start_at=start_at)
+        self._loopbacks.append((speaker.name, writer))
+        t = threading.Thread(
+            target=self._run_device_loopback,
+            args=(speaker, writer),
+            name=f"audio-loopback-{i}",
+            daemon=True,
+        )
+        t.start()
+        self._threads.append(t)
+
+    def _position(self) -> int:
+        """Samples since start(), by the wall clock."""
+        return int((time.monotonic() - self._started_at) * self._sr)
+
+    def _watch_devices(self) -> None:
+        """Loop back a headset plugged in after the recording started, too."""
+        while not self._stop.wait(DEVICE_POLL_SECONDS):
+            try:
+                speakers = list(sc.all_speakers())
+            except Exception:
+                log.debug("Listing output devices failed", exc_info=True)
+                continue
+            for speaker in speakers:
+                if str(speaker.id) not in self._known_speakers and not self._stop.is_set():
+                    log.info("Output device %r appeared; looping it back too", speaker.name)
+                    self._start_device_loopback(speaker, start_at=self._position())
 
     def _run_device_loopback(self, speaker, writer: LoopbackPartWriter) -> None:
+        opened = False
         try:
-            loopback = sc.get_microphone(id=str(speaker.id), include_loopback=True)
-            with loopback.recorder(samplerate=self._sr, channels=[0]) as rec:
-                while not self._stop.is_set():
-                    writer.write(_to_int16(rec.record(numframes=self._sr * CHUNK_SECONDS)))
-        except Exception:
-            # One device failing -- an unsupported format, or a headset dropping
-            # off the bus -- must not take the others down with it.
-            log.exception("Loopback of %r failed", speaker.name)
-            writer.failed = True
+            while not self._stop.is_set():
+                try:
+                    loopback = sc.get_microphone(id=str(speaker.id), include_loopback=True)
+                    with loopback.recorder(samplerate=self._sr, channels=[0]) as rec:
+                        if writer.dropouts and writer.dropouts[-1][1] is None:
+                            at = self._position()
+                            log.info("Loopback of %r is back", speaker.name)
+                            writer.resume_at(at)
+                            writer.dropouts[-1] = (writer.dropouts[-1][0], at / self._sr)
+                        opened = True
+                        while not self._stop.is_set():
+                            writer.write(_to_int16(rec.record(numframes=self._sr * CHUNK_SECONDS)))
+                except Exception:
+                    # One device failing must not take the others down with it.
+                    if not opened:
+                        # Never worked at all -- an unsupported format, say.
+                        log.exception("Loopback of %r failed", speaker.name)
+                        writer.failed = True
+                        return
+                    if not writer.dropouts or writer.dropouts[-1][1] is not None:
+                        # A headset dropping off the bus: keep trying, it may return.
+                        log.exception("Loopback of %r dropped out", speaker.name)
+                        writer.close()
+                        writer.dropouts.append((self._position() / self._sr, None))
+                    self._stop.wait(RECONNECT_SECONDS)
         finally:
             writer.close()
 
@@ -241,6 +304,22 @@ class AudioCaptureThread:
             return
         self.system_device_name = ", ".join(contributed) or None
         log.info("System audio captured from: %s", self.system_device_name or "no device")
+        for name, w in self._loopbacks:
+            # A device that never made a sound losing its connection is noise.
+            if w.path is None or not w.dropouts:
+                continue
+            first = _clock(w.dropouts[0][0])
+            if w.dropouts[-1][1] is None:
+                self.warnings.append(
+                    f"System audio from {name!r} dropped out at {first} and did "
+                    "not come back — the rest of the call may be missing."
+                )
+            else:
+                gap = sum(back - at for at, back in w.dropouts)
+                self.warnings.append(
+                    f"System audio from {name!r} dropped out at {first} "
+                    f"({len(w.dropouts)}×, {_duration(gap)} in total)."
+                )
         if mixed is None:
             if all(w.failed for _, w in self._loopbacks):
                 self.warnings.append("System audio (loopback) not available.")
@@ -256,7 +335,15 @@ class AudioCaptureThread:
             try:
                 record_app_loopback(out_path, self._app_names, self._sr, self._stop)
                 return
-            except ProcessLoopbackNotAvailable as e:
+            except ProcessLoopbackAborted:
+                at = _clock(self._position() / self._sr)
+                self.warnings.append(
+                    f"App audio recording stopped at {at} — the rest of the call is missing."
+                )
+                return
+            except Exception as e:
+                if not isinstance(e, ProcessLoopbackNotAvailable):
+                    log.exception("Process loopback failed")
                 log.warning("Process loopback unavailable, falling back to 'all': %s", e)
                 self.warnings.append(
                     "App filter unavailable — recording full system audio instead."

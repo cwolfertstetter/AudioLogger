@@ -474,3 +474,68 @@ def test_the_watcher_stops_before_the_capture(cfg):
     c.toggle()
 
     assert calls == ["watcher.stop", "capture.stop"]
+
+
+# --- start path edge cases -------------------------------------------------------
+
+def test_the_extend_hotkey_stops_the_dictation_it_fell_back_to(controller, cfg):
+    """No earlier dictation: extend records a plain one, and its hotkey must end it."""
+    controller.toggle(mode="dictation_extend")
+    assert controller.state is RecordingState.RECORDING
+
+    controller.toggle(mode="dictation_extend")
+
+    assert controller.state is RecordingState.IDLE
+
+
+def test_a_restart_within_the_same_second_gets_its_own_folder(controller, cfg):
+    controller.toggle()
+    controller.toggle()
+    controller.toggle()
+
+    assert controller.current_session == cfg.output_dir / "2026-05-18_14-32-15_2"
+
+
+class FailingCapture(FakeCapture):
+    def start(self) -> None:
+        raise OSError("device busy")
+
+
+def test_a_capture_that_cannot_start_leaves_no_session_behind(cfg):
+    c = RecordingController(
+        config=cfg, capture_factory=FailingCapture, mix_fn=MagicMock(),
+        enqueue_fn=MagicMock(), clock=lambda: datetime(2026, 5, 18, 14, 32, 15),
+    )
+
+    with pytest.raises(OSError):
+        c.toggle()
+
+    assert c.state is RecordingState.IDLE
+    assert list(cfg.output_dir.iterdir()) == [], "no marker for recovery to trip over"
+
+
+def test_two_starts_at_once_record_only_once(cfg):
+    import threading
+    import time
+
+    started = []
+
+    class SlowCapture(FakeCapture):
+        def start(self) -> None:
+            started.append(self)
+            time.sleep(0.05)
+            super().start()
+
+    ticks = iter(range(60))
+    c = RecordingController(
+        config=cfg, capture_factory=SlowCapture, mix_fn=MagicMock(),
+        enqueue_fn=MagicMock(), clock=lambda: datetime(2026, 5, 18, 14, 32, next(ticks)),
+    )
+    threads = [threading.Thread(target=c.toggle) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # The second press stops the first recording instead of starting another.
+    assert len(started) == 1

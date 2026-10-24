@@ -18,6 +18,10 @@ class ProcessLoopbackNotAvailable(Exception):
     pass
 
 
+class ProcessLoopbackAborted(Exception):
+    """The per-app stream failed mid-recording; the file holds what came before."""
+
+
 # --- COM/WinRT constants -------------------------------------------------
 PROCESS_LOOPBACK_MODE_INCLUDE = 0
 PROCESS_LOOPBACK_MODE_EXCLUDE = 1
@@ -86,12 +90,18 @@ def record_app_loopback(
             input=True,
             input_device_index=device_info["index"],
         )
-        if hasattr(pyaudio, "PaWasapiStreamInfo"):
-            stream_kwargs["input_host_api_specific_stream_info"] = pyaudio.PaWasapiStreamInfo(
-                flags=pyaudio.paWinWasapiProcessLoopback,
-                process_id=pids[0],
-                process_loopback_mode=PROCESS_LOOPBACK_MODE_INCLUDE,
+        if not (hasattr(pyaudio, "PaWasapiStreamInfo")
+                and hasattr(pyaudio, "paWinWasapiProcessLoopback")):
+            # Opening the stream anyway would record every app on the device
+            # while the user believes only the selected one is captured.
+            raise ProcessLoopbackNotAvailable(
+                "this pyaudiowpatch build has no process-loopback support"
             )
+        stream_kwargs["input_host_api_specific_stream_info"] = pyaudio.PaWasapiStreamInfo(
+            flags=pyaudio.paWinWasapiProcessLoopback,
+            process_id=pids[0],
+            process_loopback_mode=PROCESS_LOOPBACK_MODE_INCLUDE,
+        )
 
         stream = pa.open(**stream_kwargs)
     except ProcessLoopbackNotAvailable:
@@ -109,13 +119,15 @@ def record_app_loopback(
             while not stop_event.is_set():
                 try:
                     data = stream.read(sample_rate, exception_on_overflow=False)
-                    wav.writeframes(data)
-                except Exception:
+                except Exception as e:
                     log.exception("Process-loopback read failed")
-                    break
+                    raise ProcessLoopbackAborted(str(e)) from e
+                wav.writeframes(data)
     finally:
-        try:
-            stream.stop_stream()
-            stream.close()
-        finally:
-            pa.terminate()
+        # Each step on its own: with the device gone, stop_stream() raises too,
+        # and that must neither skip close() nor replace the real error.
+        for release in (stream.stop_stream, stream.close, pa.terminate):
+            try:
+                release()
+            except Exception:
+                log.warning("Releasing the process-loopback stream failed", exc_info=True)

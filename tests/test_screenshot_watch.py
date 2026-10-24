@@ -320,6 +320,21 @@ def test_a_snip_taken_just_before_stop_is_not_lost(watch):
     assert len(watch.saved) == 1
 
 
+def test_a_snip_just_before_stop_survives_a_briefly_locked_clipboard(watch, monkeypatch):
+    """Right after a snip, clipboard history or the Snipping Tool often hold
+    the clipboard open for a moment; one failed read used to drop the shot."""
+    from audiologger import screenshot_watch
+    monkeypatch.setattr(screenshot_watch, "FINAL_POLL_RETRY_S", 0.01)
+    watch.w.start()
+    watch.clock.now += 7
+    watch.clip.put(image())
+    watch.clip.locked = 2
+
+    watch.w.stop()
+
+    assert files(watch.dir) == ["screenshot_00-00-07.png"]
+
+
 def test_stop_without_start_does_not_poll(tmp_path):
     """Nothing was recorded, so there is nothing to catch up on -- and the
     clipboard must not be read at all."""

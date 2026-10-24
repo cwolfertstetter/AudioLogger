@@ -131,12 +131,15 @@ recordings/
 ## Troubleshooting
 
 - **"Hotkey conflict" toast:** Edit the relevant `*_hotkey` field in config.yaml, restart.
-- **Diarization disabled warning in transcript:** Set `huggingface_token` in config and accept model terms at <https://huggingface.co/pyannote/speaker-diarization-community-1> (and <https://huggingface.co/pyannote/speaker-diarization-3.1> for older whisperx versions). Worker logs a `GatedRepoError` when the right model hasn't been accepted yet.
+- **Diarization disabled warning in transcript:** Set `huggingface_token` in config and accept model terms at <https://huggingface.co/pyannote/speaker-diarization-community-1> (and <https://huggingface.co/pyannote/speaker-diarization-3.1> for older whisperx versions). Worker logs a `GatedRepoError` when the right model hasn't been accepted yet. A diarization that fails mid-run (token rejected, GPU out of memory) gives the same warning; the transcript is still written.
 - **First-run transcription hangs for several minutes:** WhisperX is downloading the ~3 GB model. Subsequent runs use the cache in `%USERPROFILE%/.cache`.
-- **"App-Filter nicht verfügbar" toast:** Per-app loopback needs Windows 10 21H2+ and a `pyaudiowpatch` build that exposes `PaWasapiStreamInfo`. The app silently falls back to full-system loopback for that recording.
-- **App crashed mid-recording:** Restart `audiologger` — orphan sessions are auto-detected, their per-device system-audio parts (`_loopback_NN_at….wav`) merged, and queued for transcription. Screenshots already saved are included.
-- **Tray icon hangs or Quit doesn't end it:** run `scripts/stop-audiologger.bat`; it kills the tray and worker processes.
+- **"App-Filter nicht verfügbar" toast:** Per-app loopback needs Windows 10 21H2+ and a `pyaudiowpatch` build that exposes `PaWasapiStreamInfo`. The app falls back to full-system loopback for that recording.
+- **"App audio recording stopped at …" toast:** the per-app stream broke mid-call; the transcript covers the call up to that point.
+- **App crashed mid-recording:** Restart `audiologger` (it refuses to start a second time while one is running) — orphan sessions are auto-detected, their per-device system-audio parts (`_loopback_NN_at….wav`) merged, and queued for transcription. Screenshots already saved are included.
+- **Tray icon hangs or Quit doesn't end it:** run `scripts/stop-audiologger.bat`; it kills the tray and worker processes (`-m audiologger…`), nothing else running from the venv. A transcription cut off by this, by Quit or by a model change continues on the next start (after a model change: right away).
 - **"Microphone dropped out …" toast:** the mic vanished mid-recording (often a dock or Thunderbolt power-state change). The gap was filled with silence; if the toast names another device, recording continued on whatever Windows made the default.
+- **"System audio from '…' dropped out …" toast:** an output device (usually a Bluetooth/USB headset) vanished mid-call. Recording resumes on it if it comes back; a headset plugged in during a call is picked up within a few seconds.
+- **"Config file unusable" toast:** config.yaml could not be read. The app runs on defaults; your file was kept as `config.yaml.broken` to fix and copy back.
 - **"No system audio was captured from any output device" toast:** nothing played on any output while recording. If this was a call, check that the call app wasn't muted and that its device is enabled in Windows Sound settings.
 - **A transcript is missing or wrong:** tray → "Re-transcribe Last Recording" runs the newest finished session through the current pipeline again.
 

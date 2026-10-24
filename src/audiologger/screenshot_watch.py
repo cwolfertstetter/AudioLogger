@@ -59,6 +59,10 @@ def find_screenshots(session_dir: Path) -> list[Screenshot]:
 # A change whose content cannot be read this many polls in a row (5 s at the
 # default rate) is given up, so one stuck clipboard cannot pin the watcher.
 MAX_READ_FAILURES = 20
+# The last look after stop(): attempts and pause between them, which together
+# stay well inside stop()'s 2 s join.
+FINAL_POLL_ATTEMPTS = 5
+FINAL_POLL_RETRY_S = 0.2
 
 # Win32 clipboard formats.
 _CF_DIB = 8
@@ -291,5 +295,19 @@ class ClipboardScreenshotWatcher:
         # second before stop() is still unread. Look once more, here on the
         # watcher thread: stop()'s join bounds the wait, and a clipboard owner
         # that hangs while rendering cannot block the hotkey thread.
-        # poll_once() logs and swallows every error itself.
-        self.poll_once()
+        # poll_once() logs and swallows every error itself.  The clipboard is
+        # often held open for a moment right after a snip (clipboard history,
+        # the Snipping Tool itself), so retry a few times within stop()'s wait.
+        for attempt in range(FINAL_POLL_ATTEMPTS):
+            if attempt:
+                time.sleep(FINAL_POLL_RETRY_S)
+            self.poll_once()
+            if not self._change_pending():
+                return
+        log.warning("Clipboard change just before stop could not be read; screenshot lost")
+
+    def _change_pending(self) -> bool:
+        try:
+            return self._clipboard.sequence_number() != self._handled
+        except Exception:
+            return False
