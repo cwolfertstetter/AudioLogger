@@ -75,7 +75,7 @@ First launch writes `%APPDATA%/AudioLogger/config.yaml`. Edit it directly, or us
 | `language`              | `de`                   | Mic-track language when the system audio has too little speech to take it from |
 | `diarization_enabled`   | `true`                 | Requires `huggingface_token`                            |
 | `huggingface_token`     | `null`                 | Paste your HF token here for diarization                |
-| `audio_source`          | `all`                  | `all` (loopback of every output device) or `apps` (per-app filter) |
+| `audio_source`          | `all`                  | `all` (loopback of every output device) or `apps` (per-app filter — not available yet: no pyaudiowpatch release has process loopback, so it records like `all` and says so) |
 | `filtered_app_names`    | `[]`                   | e.g. `["Discord.exe", "Slack.exe"]` when `audio_source: apps` |
 | `notification_enabled`  | `true`                 | Windows toast notifications. The tray switch applies at once — handy when sharing your screen |
 | `worker_prewarm`        | `true`                 | Load transcription models when tray starts (~3-5 GB VRAM, ~15 s startup). Set `false` to lazy-load. |

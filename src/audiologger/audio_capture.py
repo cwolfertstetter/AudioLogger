@@ -137,6 +137,7 @@ class AudioCaptureThread:
         self._loopbacks: list[tuple[str, LoopbackPartWriter]] = []
         self._known_speakers: set[str] = set()
         self._watch_thread: threading.Thread | None = None
+        self._sys_thread: threading.Thread | None = None
         self._started_at = 0.0
         self.warnings: list[str] = []
         # Recorded for transcript header
@@ -158,16 +159,20 @@ class AudioCaptureThread:
         if self._mic_only:
             return
         if self._audio_source == "apps":
-            t_sys = threading.Thread(
+            self._sys_thread = threading.Thread(
                 target=self._run_system, args=(sys_path,), name="audio-sys", daemon=True
             )
-            t_sys.start()
-            self._threads.append(t_sys)
+            self._sys_thread.start()
+            self._threads.append(self._sys_thread)
         else:
             self._start_device_loopbacks()
 
     def stop(self) -> None:
         self._stop.set()
+        # An "apps" capture falling back starts the device loopbacks and their
+        # watch from its own thread; wait for that before looking at them.
+        if self._sys_thread is not None:
+            self._sys_thread.join(timeout=10)
         # The device watch adds threads; once it has ended the list is final.
         if self._watch_thread is not None:
             self._watch_thread.join(timeout=10)
@@ -177,13 +182,6 @@ class AudioCaptureThread:
             self._finish_device_loopbacks()
 
     # --- internal ---
-
-    def _open_wav(self, path: Path) -> wave.Wave_write:
-        w = wave.open(str(path), "wb")
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(self._sr)
-        return w
 
     def _run_mic(self, out_path: Path) -> None:
         """Capture the default mic via PortAudio.
@@ -330,44 +328,27 @@ class AudioCaptureThread:
                 )
 
     def _run_system(self, out_path: Path) -> None:
-        """Per-app capture ("apps" mode), falling back to the default speaker."""
-        if self._audio_source == "apps":
-            try:
-                record_app_loopback(out_path, self._app_names, self._sr, self._stop)
-                return
-            except ProcessLoopbackAborted:
-                at = _clock(self._position() / self._sr)
-                self.warnings.append(
-                    f"App audio recording stopped at {at} — the rest of the call is missing."
-                )
-                return
-            except Exception as e:
-                if not isinstance(e, ProcessLoopbackNotAvailable):
-                    log.exception("Process loopback failed")
-                log.warning("Process loopback unavailable, falling back to 'all': %s", e)
-                self.warnings.append(
-                    "App filter unavailable — recording full system audio instead."
-                )
-                # fall through to default loopback
-        try:
-            spk = sc.default_speaker()
-            self.system_device_name = spk.name
-            loopback_mic = sc.get_microphone(id=str(spk.name), include_loopback=True)
-        except Exception as e:
-            log.warning("No loopback available: %s", e)
-            self.warnings.append("System audio (loopback) not available.")
-            return
-        try:
-            with self._open_wav(out_path) as wav, loopback_mic.recorder(
-                samplerate=self._sr, channels=[0]
-            ) as rec:
-                while not self._stop.is_set():
-                    data = rec.record(numframes=self._sr * CHUNK_SECONDS)
-                    self._write_chunk(wav, data)
-        except Exception:
-            log.exception("System recording failed")
-            self.warnings.append("System audio recording aborted.")
+        """Per-app capture ("apps" mode), falling back to every output device.
 
-    def _write_chunk(self, wav: wave.Wave_write, data: np.ndarray) -> None:
-        """data is float32 from soundcard, shape (N, 1). Convert to int16."""
-        wav.writeframes(_to_int16(data).tobytes())
+        No pyaudiowpatch release has process loopback (checked up to 0.2.12.9),
+        so in practice this always falls back -- and the fallback must not be
+        the default device alone, or a call on a headset is lost (2026-09-28).
+        """
+        try:
+            record_app_loopback(out_path, self._app_names, self._sr, self._stop)
+            return
+        except ProcessLoopbackAborted:
+            at = _clock(self._position() / self._sr)
+            self.warnings.append(
+                f"App audio recording stopped at {at} — the rest of the call is missing."
+            )
+            return
+        except Exception as e:
+            if not isinstance(e, ProcessLoopbackNotAvailable):
+                log.exception("Process loopback failed")
+            log.warning("Process loopback unavailable, falling back to 'all': %s", e)
+            self.warnings.append(
+                "App filter unavailable — recording full system audio instead."
+            )
+        if not self._stop.is_set():
+            self._start_device_loopbacks()

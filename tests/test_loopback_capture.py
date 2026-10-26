@@ -125,8 +125,8 @@ def fake_devices(monkeypatch):
     return add
 
 
-def run_capture(session: Path, fake_devices) -> AudioCaptureThread:
-    cap = AudioCaptureThread(session, SR, audio_source="all")
+def run_capture(session: Path, fake_devices, **kw) -> AudioCaptureThread:
+    cap = AudioCaptureThread(session, SR, **{"audio_source": "all", **kw})
     cap.start()
     for spec in fake_devices.devices.values():
         if not spec["broken"]:
@@ -175,6 +175,29 @@ def test_one_device_that_cannot_be_opened_does_not_stop_the_others(tmp_path, fak
 
     assert read(tmp_path / "system.wav")[0] > 16000
     assert cap.system_device_name == "Speakers (KLIM Mantis Audio 7.1)"
+
+
+# --- "apps" mode without process loopback --------------------------------------
+
+def test_apps_mode_falls_back_to_every_device_not_just_the_default(
+    tmp_path, fake_devices, monkeypatch
+):
+    # No pyaudiowpatch release has process loopback (checked up to 0.2.12.9), so
+    # on a real machine "apps" mode always lands here. Falling back to the default
+    # device alone repeats the silent call of 2026-09-28.
+    def no_process_loopback(*a, **kw):
+        raise audio_capture.ProcessLoopbackNotAvailable("no process-loopback support")
+
+    monkeypatch.setattr(audio_capture, "record_app_loopback", no_process_loopback)
+    fake_devices("Speakers (Realtek(R) Audio)", [chunk(0.0)] * 2)
+    fake_devices("Speakers (G432 Gaming Headset)", [chunk(0.5)] * 2)
+
+    cap = run_capture(tmp_path, fake_devices, audio_source="apps",
+                      filtered_app_names=["slack.exe"])
+
+    assert read(tmp_path / "system.wav")[:2 * SR].min() > 16000
+    assert cap.system_device_name == "Speakers (G432 Gaming Headset)"
+    assert any("app filter unavailable" in w.lower() for w in cap.warnings), cap.warnings
 
 
 # --- crash recovery ------------------------------------------------------------
