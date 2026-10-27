@@ -14,6 +14,7 @@ poll loop, so the first job does not pay model-load latency.
 import argparse
 import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -29,6 +30,7 @@ import numpy as np
 
 from audiologger.audio_mix import append_wav
 from audiologger.config import Config, load_config
+from audiologger.job_queue import EXITING_FILE, atomic_write_text, pending_lock
 from audiologger.paths import config_path
 from audiologger.screenshot_watch import find_screenshots
 from audiologger.segment import Segment
@@ -68,12 +70,26 @@ def _read_pending(pending_path: Path) -> list[Path]:
 
 def _write_pending(pending_path: Path, sessions: list[Path]) -> None:
     if not sessions:
-        pending_path.write_text("", encoding="utf-8")
+        atomic_write_text(pending_path, "")
         return
-    pending_path.write_text(
+    atomic_write_text(
+        pending_path,
         "\n".join(str(p).replace("\\", "/") for p in sessions) + "\n",
-        encoding="utf-8",
     )
+
+
+def _drop_finished(pending_path: Path, current: Path) -> list[Path]:
+    """Remove the finished job -- only its own entry, the first one.
+
+    A second entry for the same session was queued while it ran (re-transcribe
+    after a model change) and must still run.
+    """
+    with pending_lock(pending_path.parent):
+        remaining = _read_pending(pending_path)
+        if current in remaining:
+            remaining.remove(current)
+        _write_pending(pending_path, remaining)
+    return remaining
 
 
 def _write_status(
@@ -84,7 +100,8 @@ def _write_status(
     warming: bool = False,
     last_finished: dict | None = None,
 ) -> None:
-    status_path.write_text(
+    atomic_write_text(
+        status_path,
         json.dumps(
             {
                 "running": running,
@@ -95,7 +112,6 @@ def _write_status(
             },
             ensure_ascii=False,
         ),
-        encoding="utf-8",
     )
 
 
@@ -261,8 +277,12 @@ _BOILERPLATE_EXACT = frozenset({
 })
 
 _BOILERPLATE_PATTERNS = (
-    # "Untertitelung des ZDF, 2020" / "Untertitel im Auftrag des ..." / "Untertitel von ..."
-    re.compile(r"^untertitel(ung)?\s+(des|der|von|im auftrag|by)\b"),
+    # "Untertitel im Auftrag des ZDF für funk, 2017"
+    re.compile(r"^untertitel(ung)?\s+im auftrag\b"),
+    # "Untertitelung des ZDF" / "Untertitel von Stephanie Geiges": the credit
+    # names a station or a person and ends there.  A sentence that goes on
+    # ("Untertitel der Präsentation fehlen noch.") is somebody talking.
+    re.compile(r"^untertitel(ung)?\s+(des|der|von|by)\s+\S+(\s+\S+)?$"),
     # "Untertitelung. BR 2018" -- station after a full stop.  What every one of
     # these credits carries is a broadcast year, and talking about subtitles in
     # a meeting does not, so the year is what makes this safe to match.
@@ -270,7 +290,7 @@ _BOILERPLATE_PATTERNS = (
     # "Untertitel 2.97" -- a bare version number
     re.compile(r"^untertitel\s+[\d.,]+$"),
     re.compile(r"^teksting av\b"),
-    re.compile(r"^subtitles?\s+(by|von)\b"),
+    re.compile(r"^subtitles?\s+(by|von)\s+\S+(\s+\S+)?$"),
     re.compile(r"\bamara\.org\b"),
 )
 
@@ -314,6 +334,8 @@ class TranscriptionResult:
     """Segments plus the language they were transcribed in."""
     segments: list[Segment]
     language: str | None
+    # Whether pyannote actually labelled the speakers of this file.
+    diarized: bool = False
 
 
 class WhisperXPipeline:
@@ -424,16 +446,23 @@ class WhisperXPipeline:
             except Exception:
                 log.exception("Alignment failed; using non-aligned segments")
 
+        diarized = False
         if diarize and self.diarization_enabled:
-            self._ensure_diarize()
-            if self._diarize is not None:
-                diarize_segments = self._diarize(audio)
-                result = whisperx.assign_word_speakers(diarize_segments, result)
+            # Speaker labels are a bonus: a rejected HF token or pyannote
+            # running out of GPU memory must not cost the whole transcript.
+            try:
+                self._ensure_diarize()
+                if self._diarize is not None:
+                    diarize_segments = self._diarize(audio)
+                    result = whisperx.assign_word_speakers(diarize_segments, result)
+                    diarized = True
+            except Exception:
+                log.exception("Diarization failed; all speakers labelled 'Others'")
 
         # Second pass at Whisper's invented text: by wording, for the stock
         # subtitle phrases it drops onto real audio, where no level test reaches.
-        segments = drop_boilerplate_segments(self._to_segments(result, diarize))
-        return TranscriptionResult(segments, detected_language)
+        segments = drop_boilerplate_segments(self._to_segments(result, diarized))
+        return TranscriptionResult(segments, detected_language, diarized)
 
     def _to_segments(self, result: dict, diarize: bool) -> list[Segment]:
         segments: list[Segment] = []
@@ -444,7 +473,9 @@ class WhisperXPipeline:
             if not text:
                 continue
             if diarize:
-                speaker_raw = seg.get("speaker", "SPEAKER_00")
+                # pyannote leaves a segment without a speaker when no turn
+                # overlaps it; guessing "Speaker 1" would misattribute it.
+                speaker_raw = seg.get("speaker") or ""
                 # pyannote returns "SPEAKER_00", "SPEAKER_01", ... -> "Speaker 1", "Speaker 2", ...
                 if speaker_raw.startswith("SPEAKER_"):
                     num = int(speaker_raw.split("_")[1]) + 1
@@ -561,6 +592,11 @@ def _process_dictation_extend_session(
     Returns (target_session_name, success).
     On success the temp session_dir is deleted.
     On failure the temp dir is left intact for investigation.
+
+    The target's new transcript.txt, transcript.json and mic.wav are built in
+    the chunk folder first and only then moved over the originals.  A worker
+    killed half-way leaves the target untouched -- or, past the commit mark,
+    the next run finishes the moves instead of appending the chunk twice.
     """
     target_txt = session_dir / "target_session.txt"
     if not target_txt.exists():
@@ -577,6 +613,12 @@ def _process_dictation_extend_session(
         return (session_dir.name, False)
 
     mic_wav = session_dir / "mic.wav"
+    commit_mark = session_dir / _EXTEND_COMMIT
+
+    if commit_mark.exists():
+        log.info("Finishing an interrupted extend of %s", target_dir.name)
+        _apply_staged_extend(session_dir, target_dir)
+        return (target_dir.name, True)
 
     try:
         # 1. Transcribe new chunk
@@ -609,7 +651,7 @@ def _process_dictation_extend_session(
             combined_txt = existing_txt.rstrip() + "\n\n" + new_text + "\n"
         else:
             combined_txt = new_text + "\n"
-        existing_txt_path.write_text(combined_txt, encoding="utf-8")
+        (session_dir / (_STAGED_PREFIX + "transcript.txt")).write_text(combined_txt, encoding="utf-8")
 
         # 4. Update transcript.json
         existing_json_path = target_dir / "transcript.json"
@@ -626,15 +668,23 @@ def _process_dictation_extend_session(
         existing_json["segments"] = all_segments
         existing_json["text"] = full_text
         existing_json["mode"] = "dictation"
-        existing_json_path.write_text(
+        (session_dir / (_STAGED_PREFIX + "transcript.json")).write_text(
             json.dumps(existing_json, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
         # 5. Concatenate audio
         target_mic = target_dir / "mic.wav"
-        append_wav(target_mic, mic_wav)
+        staged_mic = session_dir / (_STAGED_PREFIX + "mic.wav")
+        if target_mic.exists():
+            append_wav(target_mic, mic_wav, staged_mic)
+        else:
+            shutil.copyfile(mic_wav, staged_mic)
 
-        # 6. Copy new chunk text to clipboard
+        # 6. Commit: from here on a rerun finishes the moves, never re-appends.
+        commit_mark.touch()
+        _apply_staged_extend(session_dir, target_dir)
+
+        # 7. Copy new chunk text to clipboard
         try:
             import pyperclip
             pyperclip.copy(new_text)
@@ -644,9 +694,6 @@ def _process_dictation_extend_session(
 
         log.info("Extend complete: appended chunk to %s", target_dir.name)
 
-        # 7. Clean up temp session
-        shutil.rmtree(session_dir)
-
         chunk_preview = new_text[:140] + "..." if len(new_text) > 140 else new_text
         return (target_dir.name, True)
 
@@ -654,6 +701,19 @@ def _process_dictation_extend_session(
         log.error("dictation_extend failed for %s:\n%s", session_dir, traceback.format_exc())
         (session_dir / "job.log").write_text(traceback.format_exc(), encoding="utf-8")
         return (session_dir.name, False)
+
+
+_STAGED_PREFIX = "_extend_new_"
+_EXTEND_COMMIT = "_extend_commit"
+
+
+def _apply_staged_extend(session_dir: Path, target_dir: Path) -> None:
+    """Move the staged files over the target's, then delete the chunk folder."""
+    for name in ("transcript.txt", "transcript.json", "mic.wav"):
+        staged = session_dir / (_STAGED_PREFIX + name)
+        if staged.exists():  # already moved by an interrupted earlier run
+            os.replace(staged, target_dir / name)
+    shutil.rmtree(session_dir)
 
 
 def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> None:
@@ -676,7 +736,8 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
     # the system track resolved to, falling back to the configured language.
     sys_result = pipeline.transcribe(sys_wav, diarize=True)
     sys_segments = sys_result.segments
-    if not pipeline.diarization_enabled:
+    # No system speech means nothing to diarize -- not worth a warning.
+    if not sys_result.diarized and (sys_segments or not pipeline.diarization_enabled):
         warnings.append("Diarization disabled or unavailable — all speakers labelled 'Others'.")
 
     # Only a track that actually carried a conversation has a language worth
@@ -703,13 +764,14 @@ def _process_meeting_session(session_dir: Path, pipeline: WhisperXPipeline) -> N
     recorded_at_str = session_dir.name.replace("_", " ").replace("-", ":", 2).replace("-", ":")
     # session_dir.name is YYYY-MM-DD_HH-MM-SS -- produce "YYYY-MM-DD HH:MM:SS"
     try:
-        dt = datetime.strptime(session_dir.name, "%Y-%m-%d_%H-%M-%S")
+        # A quick restart within the same second adds "_2" -- see controller.
+        dt = datetime.strptime(session_dir.name[:19], "%Y-%m-%d_%H-%M-%S")
         recorded_at_str = dt.strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
         pass
 
     model_label = f"WhisperX {pipeline.model_size}"
-    if pipeline.diarization_enabled:
+    if sys_result.diarized:
         # whisperx 3.8+ uses speaker-diarization-community-1; older versions used 3.1.
         model_label += " + pyannote/speaker-diarization-community-1"
 
@@ -783,7 +845,8 @@ def main(argv: list[str]) -> int:
     last_job_finished = datetime.now()
     last_finished: dict | None = None
     while True:
-        sessions = _read_pending(pending_path)
+        with pending_lock(state_dir):
+            sessions = _read_pending(pending_path)
         if sessions:
             current = sessions[0]
             last_failed_path = state_dir / "last_failed.txt"
@@ -801,7 +864,11 @@ def main(argv: list[str]) -> int:
                 last_failed_path.unlink(missing_ok=True)
             except Exception:
                 log.error("Job failed for %s:\n%s", current, traceback.format_exc())
-                (current / "job.log").write_text(traceback.format_exc(), encoding="utf-8")
+                try:
+                    (current / "job.log").write_text(traceback.format_exc(), encoding="utf-8")
+                except OSError:
+                    # The session folder itself may be gone (deleted while queued).
+                    log.warning("Could not write job.log for %s", current)
                 # M5: record the failed session name
                 last_failed_path.write_text(current.name, encoding="utf-8")
                 last_finished = {
@@ -812,9 +879,8 @@ def main(argv: list[str]) -> int:
                 }
             finally:
                 # Remove this session from pending whether success or failure
-                remaining = _read_pending(pending_path)
-                remaining = [p for p in remaining if p != current]
-                _write_pending(pending_path, remaining)
+                remaining = _drop_finished(pending_path, current)
+            last_finished = {**last_finished, "finished_at": datetime.now().isoformat()}
             last_job_finished = datetime.now()
             _write_status(
                 status_path,
@@ -827,8 +893,16 @@ def main(argv: list[str]) -> int:
 
         # Idle -- exit after warm window
         if datetime.now() - last_job_finished > timedelta(seconds=warm_idle_seconds):
+            with pending_lock(state_dir):
+                if _read_pending(pending_path):
+                    continue  # enqueued just now
+                _write_status(status_path, running=None, queued=[], mode=None,
+                              last_finished=last_finished)
+                # From here on this worker takes no more jobs and writes
+                # nothing; the tray spawns a new one for anything enqueued
+                # while this process winds down.
+                (state_dir / EXITING_FILE).touch()
             log.info("Idle %s s, exiting", warm_idle_seconds)
-            _write_status(status_path, running=None, queued=[], mode=None, last_finished=last_finished)
             return 0
 
         time.sleep(POLL_INTERVAL_SECONDS)

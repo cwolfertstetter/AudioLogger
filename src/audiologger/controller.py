@@ -1,5 +1,7 @@
 """RecordingController — state machine for the record/stop toggle."""
 import logging
+import shutil
+import threading
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -67,6 +69,12 @@ class RecordingController:
         self._current_watcher: WatcherLike | None = None
         self._current_session: Path | None = None
         self._current_mode: str | None = None
+        # The hotkey that started the recording; differs from _current_mode
+        # when the extend hotkey fell back to a plain dictation.
+        self._requested_mode: str | None = None
+        # Menu clicks (pystray thread) and hotkeys (keyboard thread) both
+        # toggle; without this, two starts in the same moment ran two captures.
+        self._lock = threading.Lock()
 
     @property
     def current_session(self) -> Path | None:
@@ -78,10 +86,14 @@ class RecordingController:
         return self._state
 
     def toggle(self, mode: str = "meeting") -> None:
+        with self._lock:
+            self._toggle(mode)
+
+    def _toggle(self, mode: str) -> None:
         if self._state is RecordingState.IDLE:
             self._start(mode)
         elif self._state is RecordingState.RECORDING:
-            if mode == self._current_mode:
+            if mode in (self._current_mode, self._requested_mode):
                 self._stop()
             else:
                 log.warning(
@@ -94,6 +106,7 @@ class RecordingController:
     def _start(self, mode: str = "meeting") -> None:
         out = self._config.output_dir
         out.mkdir(parents=True, exist_ok=True)
+        requested_mode = mode
 
         # Resolve effective mode and optional extend target before creating session dir.
         target_session: Path | None = None
@@ -103,8 +116,30 @@ class RecordingController:
                 log.info("No previous dictation session found; falling back to dictation mode")
                 mode = "dictation"
 
-        session = out / session_dirname(self._clock())
-        session.mkdir()
+        session = self._new_session_dir(out)
+        try:
+            self._begin(session, mode, target_session)
+        except Exception:
+            # Without this the folder keeps its marker, and the next start
+            # "recovers" an empty session into a failed transcription.
+            shutil.rmtree(session, ignore_errors=True)
+            raise
+        self._requested_mode = requested_mode
+
+    def _new_session_dir(self, out: Path) -> Path:
+        """Folder names have one-second resolution; a quick restart adds _2, _3, ..."""
+        base = session_dirname(self._clock())
+        session = out / base
+        n = 2
+        while True:
+            try:
+                session.mkdir()
+                return session
+            except FileExistsError:
+                session = out / f"{base}_{n}"
+                n += 1
+
+    def _begin(self, session: Path, mode: str, target_session: Path | None) -> None:
         (session / MARKER_FILENAME).touch()
         (session / MODE_FILENAME).write_text(mode, encoding="utf-8")
 
@@ -120,7 +155,14 @@ class RecordingController:
             list(self._config.filtered_app_names),
             mode in ("dictation", "dictation_extend"),
         )
-        capture.start()
+        try:
+            capture.start()
+        except Exception:
+            try:
+                capture.stop()
+            except Exception:
+                log.exception("Could not stop the capture that failed to start")
+            raise
         if mode == "meeting" and self._screenshot_watcher_factory is not None:
             self._current_watcher = self._start_watcher(session)
         self._current_capture = capture
@@ -169,6 +211,7 @@ class RecordingController:
         self._current_capture = None
         self._current_session = None
         self._current_mode = None
+        self._requested_mode = None
         self._state = RecordingState.IDLE
 
         # C3: surface the warnings. capture_warnings.txt alone went unread for

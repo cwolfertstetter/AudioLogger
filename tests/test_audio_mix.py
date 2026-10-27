@@ -91,3 +91,28 @@ def test_append_wav_concatenates_samples(tmp_path):
     assert len(data) == 72000
     assert np.all(data[:48000] == 100)
     assert np.all(data[48000:] == 200)
+
+
+def test_mix_treats_an_empty_file_as_missing(tmp_path):
+    """A crash in the first second leaves mic.wav without even a header."""
+    (tmp_path / "mic.wav").touch()
+    write_wav(tmp_path / "sys.wav", np.array([5, 6, 7], dtype=np.int16))
+    out = tmp_path / "mixed.wav"
+
+    mix_to_file(tmp_path / "mic.wav", tmp_path / "sys.wav", out)
+
+    assert read_wav(out)[0].tolist() == [5, 6, 7]
+
+
+def test_mix_works_in_blocks_across_unequal_lengths(tmp_path):
+    mic = np.arange(25, dtype=np.int16)
+    sys_ = np.full(12, 100, dtype=np.int16)
+    write_wav(tmp_path / "mic.wav", mic)
+    write_wav(tmp_path / "sys.wav", sys_)
+    out = tmp_path / "mixed.wav"
+
+    mix_to_file(tmp_path / "mic.wav", tmp_path / "sys.wav", out, block_frames=5)
+
+    expected = mic.astype(np.int32)
+    expected[:12] += 100
+    assert read_wav(out)[0].tolist() == expected.tolist()

@@ -125,8 +125,8 @@ def fake_devices(monkeypatch):
     return add
 
 
-def run_capture(session: Path, fake_devices) -> AudioCaptureThread:
-    cap = AudioCaptureThread(session, SR, audio_source="all")
+def run_capture(session: Path, fake_devices, **kw) -> AudioCaptureThread:
+    cap = AudioCaptureThread(session, SR, **{"audio_source": "all", **kw})
     cap.start()
     for spec in fake_devices.devices.values():
         if not spec["broken"]:
@@ -177,6 +177,29 @@ def test_one_device_that_cannot_be_opened_does_not_stop_the_others(tmp_path, fak
     assert cap.system_device_name == "Speakers (KLIM Mantis Audio 7.1)"
 
 
+# --- "apps" mode without process loopback --------------------------------------
+
+def test_apps_mode_falls_back_to_every_device_not_just_the_default(
+    tmp_path, fake_devices, monkeypatch
+):
+    # No pyaudiowpatch release has process loopback (checked up to 0.2.12.9), so
+    # on a real machine "apps" mode always lands here. Falling back to the default
+    # device alone repeats the silent call of 2026-09-28.
+    def no_process_loopback(*a, **kw):
+        raise audio_capture.ProcessLoopbackNotAvailable("no process-loopback support")
+
+    monkeypatch.setattr(audio_capture, "record_app_loopback", no_process_loopback)
+    fake_devices("Speakers (Realtek(R) Audio)", [chunk(0.0)] * 2)
+    fake_devices("Speakers (G432 Gaming Headset)", [chunk(0.5)] * 2)
+
+    cap = run_capture(tmp_path, fake_devices, audio_source="apps",
+                      filtered_app_names=["slack.exe"])
+
+    assert read(tmp_path / "system.wav")[:2 * SR].min() > 16000
+    assert cap.system_device_name == "Speakers (G432 Gaming Headset)"
+    assert any("app filter unavailable" in w.lower() for w in cap.warnings), cap.warnings
+
+
 # --- crash recovery ------------------------------------------------------------
 
 def test_recovery_after_a_crash_merges_the_parts_left_behind(tmp_path):
@@ -207,3 +230,93 @@ def test_recovery_after_a_crash_merges_the_parts_left_behind(tmp_path):
     assert read(session / "system.wav").tolist() == [0, 0, 300, 300, 300]
     assert parts(session) == []
     assert enqueued == [session]
+
+
+# --- a device dropping out or turning up mid-recording -----------------------------
+
+class DroppingRecorder(FakeRecorder):
+    """Plays its chunks, then fails the way a vanished headset does."""
+
+    def record(self, numframes):
+        if self._chunks:
+            return self._chunks.pop(0)
+        self._drained.set()
+        raise RuntimeError("device invalidated")
+
+
+@pytest.fixture
+def scripted_sc(monkeypatch):
+    """Each get_microphone() call for a device takes the next scripted opening."""
+    monkeypatch.setattr(audio_capture, "RECONNECT_SECONDS", 0.01)
+    monkeypatch.setattr(audio_capture, "DEVICE_POLL_SECONDS", 0.01)
+    speakers: list[SimpleNamespace] = []
+    openings: dict[str, list] = {}
+
+    def get_microphone(id, include_loopback=False):
+        queue = openings[id]
+        if not queue:
+            raise RuntimeError("no such device")
+        rec = queue.pop(0)
+        return SimpleNamespace(recorder=lambda samplerate, channels: rec)
+
+    monkeypatch.setattr(audio_capture, "sc", SimpleNamespace(
+        all_speakers=lambda: list(speakers), get_microphone=get_microphone,
+    ))
+
+    def silent_mic(out_path, sample_rate, stop_event, **kw):
+        stop_event.wait()
+        return MicCaptureResult("Fake Mic", 1)
+
+    monkeypatch.setattr(audio_capture, "record_microphone", silent_mic)
+
+    def add(name, *recorders):
+        speakers.append(SimpleNamespace(name=name, id=f"id-{name}"))
+        openings[f"id-{name}"] = list(recorders)
+
+    return add
+
+
+def test_a_headset_that_drops_out_for_good_is_reported(tmp_path, scripted_sc):
+    drained = threading.Event()
+    scripted_sc("Headset", DroppingRecorder([chunk(0.5)] * 2, drained))
+    cap = AudioCaptureThread(tmp_path, SR, audio_source="all")
+    cap.start()
+    assert drained.wait(5)
+    time.sleep(0.05)
+    cap.stop()
+
+    assert read(tmp_path / "system.wav")[:2 * SR].min() > 16000
+    assert any("did not come back" in w for w in cap.warnings), cap.warnings
+
+
+def test_a_headset_that_comes_back_is_recorded_again(tmp_path, scripted_sc):
+    first, second = threading.Event(), threading.Event()
+    scripted_sc(
+        "Headset",
+        DroppingRecorder([chunk(0.5)], first),
+        FakeRecorder([chunk(0.25)], second),
+    )
+    cap = AudioCaptureThread(tmp_path, SR, audio_source="all")
+    cap.start()
+    assert first.wait(5) and second.wait(5)
+    cap.stop()
+
+    system = read(tmp_path / "system.wav")
+    assert system.max() > 16000, "audio before the drop"
+    assert (abs(system.astype(int) - 8191) <= 2).sum() >= SR, "audio after it"
+    assert any("dropped out" in w and "did not come back" not in w for w in cap.warnings)
+
+
+def test_a_headset_plugged_in_during_the_call_is_recorded(tmp_path, scripted_sc):
+    idle = threading.Event()
+    scripted_sc("Speakers", FakeRecorder([], idle))
+    cap = AudioCaptureThread(tmp_path, SR, audio_source="all")
+    cap.start()
+    assert idle.wait(5)
+    late = threading.Event()
+    scripted_sc("Headset", FakeRecorder([chunk(0.5)], late))
+    assert late.wait(5)
+    cap.stop()
+
+    assert read(tmp_path / "system.wav").max() > 16000
+    assert cap.system_device_name == "Headset"

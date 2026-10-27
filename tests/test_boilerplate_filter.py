@@ -36,6 +36,9 @@ def texts(segments):
     "Продолжение следует...",
     "Takk for at du så med.",
     "Teksting av Nicolai Winther",
+    "Untertitel von Stephanie Geiges",
+    "Untertitelung des ZDF",
+    "Subtitles by the Amara.org community",
 ])
 def test_drops_boilerplate_that_makes_up_a_whole_segment(text):
     assert drop_boilerplate_segments([seg(text)]) == []
@@ -139,6 +142,9 @@ def test_drops_broadcaster_credits_with_a_year(text):
 @pytest.mark.parametrize("text", [
     "Wir brauchen Untertitel für das Video.",
     "Untertitel wären hier wirklich hilfreich.",
+    "Untertitel der Präsentation fehlen noch.",
+    "Untertitel von YouTube sind oft falsch.",
+    "Subtitles by default are off.",
 ])
 def test_keeps_real_talk_about_subtitles(text):
     assert texts(drop_boilerplate_segments([seg(text)])) == [text]

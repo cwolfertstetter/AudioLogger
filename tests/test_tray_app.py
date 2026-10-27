@@ -1,7 +1,7 @@
 """Tray-side toast building. Most tests construct the app via __new__ so we
 never touch the real config/appdata directories that TrayApp.__init__ reaches
 for; the few that need the real wiring build a TrayApp() with config_path,
-load_config and appdata_dir monkeypatched into tmp_path.
+load_config_checked and appdata_dir monkeypatched into tmp_path.
 
 Meeting recordings start a clipboard screenshot watcher, so no test here may
 reach the real Windows clipboard: see _no_real_clipboard below."""
@@ -109,7 +109,7 @@ def test_controller_is_wired_to_the_warning_toast(tmp_path, monkeypatch):
 
     cfg = Config(output_dir=tmp_path / "recs")
     monkeypatch.setattr(ta, "config_path", lambda: tmp_path / "config.yaml")
-    monkeypatch.setattr(ta, "load_config", lambda _p: cfg)
+    monkeypatch.setattr(ta, "load_config_checked", lambda _p: (cfg, None))
     monkeypatch.setattr(ta, "appdata_dir", lambda: tmp_path / "appdata")
 
     app = ta.TrayApp()
@@ -127,7 +127,7 @@ def test_dead_mic_recording_produces_a_visible_toast(tmp_path, monkeypatch):
 
     cfg = Config(output_dir=tmp_path / "recs")
     monkeypatch.setattr(ta, "config_path", lambda: tmp_path / "config.yaml")
-    monkeypatch.setattr(ta, "load_config", lambda _p: cfg)
+    monkeypatch.setattr(ta, "load_config_checked", lambda _p: (cfg, None))
     monkeypatch.setattr(ta, "appdata_dir", lambda: tmp_path / "appdata")
 
     class DeadMicCapture:
@@ -246,7 +246,7 @@ def test_controller_is_wired_to_the_screenshot_toast(tmp_path, monkeypatch):
 
     cfg = Config(output_dir=tmp_path / "recs")
     monkeypatch.setattr(ta, "config_path", lambda: tmp_path / "config.yaml")
-    monkeypatch.setattr(ta, "load_config", lambda _p: cfg)
+    monkeypatch.setattr(ta, "load_config_checked", lambda _p: (cfg, None))
     monkeypatch.setattr(ta, "appdata_dir", lambda: tmp_path / "appdata")
 
     app = ta.TrayApp()
@@ -311,3 +311,138 @@ def test_switching_notifications_on_confirms_and_resumes_toasts(notifying_app, s
     assert [t["title"] for t in shown_toasts] == ["Setting changed", "Screenshot 1 saved"]
     # The switch applies at once, so the confirmation must not tell anyone to restart.
     assert "Restart" not in shown_toasts[0]["msg"]
+
+
+# --- completion toasts ---------------------------------------------------------
+
+class ScriptedQueue:
+    """Hands out one status per poll, then ends the refresh loop."""
+
+    def __init__(self, app, statuses):
+        self._app = app
+        self._statuses = list(statuses)
+
+    def status(self):
+        from audiologger.job_queue import JobStatus
+        if len(self._statuses) == 1:
+            self._app._stop_event.set()
+        return JobStatus(**self._statuses.pop(0))
+
+
+def _run_refresh_loop(statuses, monkeypatch):
+    import threading
+    import audiologger.tray_app as ta
+    from audiologger.controller import RecordingState
+
+    monkeypatch.setattr(ta.time, "sleep", lambda s: None)
+    a = TrayApp.__new__(TrayApp)
+    a._stop_event = threading.Event()
+    a.controller = type("C", (), {"state": RecordingState.IDLE})()
+    a.queue = ScriptedQueue(a, statuses)
+    a._set_icon = lambda icon: None
+    handled = []
+    a._handle_completion = handled.append
+    a._status_refresh_loop()
+    return handled
+
+
+def _done(session, at):
+    return {"session_id": session, "mode": "meeting", "was_extend": False,
+            "success": True, "finished_at": at}
+
+
+def test_the_first_job_of_a_fresh_worker_gets_its_toast(monkeypatch):
+    """A new worker reports last_finished=None until its first job ends."""
+    old = _done("A", "t1")
+    new = _done("B", "t2")
+
+    handled = _run_refresh_loop([
+        {"last_finished": old},                      # seen at start-up: stale
+        {"running": "B", "last_finished": None},     # worker respawned
+        {"running": None, "last_finished": new},
+    ], monkeypatch)
+
+    assert handled == [new]
+
+
+def test_a_status_file_read_mid_write_does_not_replay_an_old_toast(monkeypatch):
+    old = _done("A", "t1")
+
+    handled = _run_refresh_loop([
+        {"last_finished": old},
+        {"last_finished": None},   # unreadable status -> {}
+        {"last_finished": old},
+    ], monkeypatch)
+
+    assert handled == []
+
+
+def test_re_transcribing_the_same_session_toasts_again(monkeypatch):
+    first = _done("A", "t1")
+    again = _done("A", "t2")
+
+    handled = _run_refresh_loop([
+        {"last_finished": None},
+        {"last_finished": first},
+        {"last_finished": again},
+    ], monkeypatch)
+
+    assert handled == [first, again]
+
+
+# --- crash recovery at start-up --------------------------------------------------
+
+def _orphan_app(tmp_path, enqueue):
+    from types import SimpleNamespace
+    a = TrayApp.__new__(TrayApp)
+    a.cfg = Config(output_dir=tmp_path / "recs")
+    a.queue = SimpleNamespace(enqueue=enqueue)
+    return a
+
+
+def _orphan(tmp_path, name="2026-10-01_10-00-00"):
+    from audiologger.paths import MARKER_FILENAME
+    s = tmp_path / "recs" / name
+    s.mkdir(parents=True)
+    (s / MARKER_FILENAME).touch()
+    return s
+
+
+def test_recovery_survives_a_crash_in_the_first_second(tmp_path):
+    """wave writes no header before the first frames: mic.wav is 0 bytes."""
+    from audiologger.paths import MARKER_FILENAME
+    session = _orphan(tmp_path)
+    (session / "mic.wav").touch()
+    enqueued = []
+
+    _orphan_app(tmp_path, enqueued.append)._handle_orphaned_sessions()
+
+    assert enqueued == [session]
+    assert not (session / MARKER_FILENAME).exists()
+
+
+def test_recovery_survives_a_mix_that_runs_out_of_memory(tmp_path, monkeypatch):
+    import audiologger.tray_app as ta
+
+    def out_of_memory(*a):
+        raise MemoryError
+
+    monkeypatch.setattr(ta, "mix_to_file", out_of_memory)
+    session = _orphan(tmp_path)
+    enqueued = []
+
+    _orphan_app(tmp_path, enqueued.append)._handle_orphaned_sessions()
+
+    assert enqueued == [session]
+
+
+def test_recovery_keeps_the_marker_when_the_session_cannot_be_queued(tmp_path):
+    from audiologger.paths import MARKER_FILENAME
+    session = _orphan(tmp_path)
+
+    def broken_enqueue(s):
+        raise OSError("disk full")
+
+    _orphan_app(tmp_path, broken_enqueue)._handle_orphaned_sessions()
+
+    assert (session / MARKER_FILENAME).exists(), "the next start tries again"

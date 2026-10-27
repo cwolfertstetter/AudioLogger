@@ -57,3 +57,55 @@ def test_output_dir_is_path(tmp_path):
     cfg_file.write_text("output_dir: C:/Recordings\n")
     cfg = load_config(cfg_file)
     assert cfg.output_dir == Path("C:/Recordings")
+
+
+# --- files written by hand -----------------------------------------------------
+
+from audiologger.config import load_config_checked  # noqa: E402
+
+
+def test_a_file_with_a_syntax_error_falls_back_to_defaults_and_is_kept(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("hotkey: [ctrl+alt+r\n", encoding="utf-8")
+
+    cfg, problem = load_config_checked(p)
+
+    assert cfg == Config()
+    assert problem and "config.yaml.broken" in problem
+    assert (tmp_path / "config.yaml.broken").read_text(encoding="utf-8") == "hotkey: [ctrl+alt+r\n"
+
+
+def test_a_file_that_is_not_a_mapping_falls_back_to_defaults(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("- a\n- b\n", encoding="utf-8")
+
+    cfg, problem = load_config_checked(p)
+
+    assert cfg == Config()
+    assert problem
+
+
+def test_empty_values_mean_the_default(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("output_dir:\nfiltered_app_names:\nhuggingface_token:\n", encoding="utf-8")
+
+    cfg = load_config(p)
+
+    assert cfg.output_dir == Config().output_dir
+    assert cfg.filtered_app_names == []
+    assert cfg.huggingface_token is None
+
+
+def test_norwegian_survives_yaml_reading_no_as_false(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("language: no\n", encoding="utf-8")
+
+    assert load_config(p).language == "no"
+    assert load_config(p).language == "no", "and stays so after the rewrite"
+
+
+def test_a_single_app_name_is_taken_as_a_list(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("filtered_app_names: Teams.exe\n", encoding="utf-8")
+
+    assert load_config(p).filtered_app_names == ["Teams.exe"]

@@ -177,3 +177,56 @@ def test_status_last_finished_reads_payload(state_dir):
     assert status.last_finished == payload
     assert status.last_finished["session_id"] == "2026-05-19_14-30-22"
     assert status.last_finished["was_extend"] is True
+
+
+# --- workers that are winding down or were killed ----------------------------
+
+def _alive():
+    proc = MagicMock()
+    proc.poll.return_value = None
+    return proc
+
+
+def test_enqueue_spawns_a_new_worker_while_the_old_one_is_exiting(state_dir):
+    """poll() still reports a worker that already decided to quit."""
+    from audiologger.job_queue import EXITING_FILE
+
+    spawner = MagicMock(side_effect=[_alive(), _alive()])
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=spawner)
+    q.enqueue(Path("C:/recs/s1"))
+    (state_dir / EXITING_FILE).touch()  # the worker found the queue empty
+
+    q.enqueue(Path("C:/recs/s2"))
+
+    assert spawner.call_count == 2
+    assert not (state_dir / EXITING_FILE).exists()
+
+
+def test_resume_restarts_on_a_job_a_killed_worker_left_behind(state_dir):
+    (state_dir / "pending.txt").write_text("C:/recs/s1\n", encoding="utf-8")
+    spawner = MagicMock(return_value=_alive())
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=spawner)
+
+    q.resume()
+
+    spawner.assert_called_once()
+
+
+def test_resume_does_nothing_without_pending_jobs(state_dir):
+    spawner = MagicMock()
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=spawner)
+
+    q.resume()
+
+    spawner.assert_not_called()
+
+
+def test_stop_worker_terminates_and_forgets_it(state_dir):
+    proc = _alive()
+    q = TranscriptionJobQueue(state_dir=state_dir, spawner=MagicMock(return_value=proc))
+    q.enqueue(Path("C:/recs/s1"))
+
+    q.stop_worker()
+
+    proc.terminate.assert_called_once()
+    assert q._worker is None
